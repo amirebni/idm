@@ -10,8 +10,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install "requests[socks]" pyinstaller
-      - run: pyinstaller --noconfirm --noconsole --onefile --name MyDM --hidden-import socks --hidden-import urllib3.contrib.socks dm.py
+      - run: pip install "requests[socks]" tkinterdnd2 pyinstaller
+      - run: pyinstaller --noconfirm --noconsole --onefile --name MyDM --collect-all tkinterdnd2 --hidden-import socks --hidden-import urllib3.contrib.socks dm.py
       - run: choco install innosetup -y --no-progress
       - run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss'
       - uses: actions/upload-artifact@v4
