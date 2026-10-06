@@ -1,14 +1,15 @@
 [Setup]
 AppName=MyDM
-AppVersion=2.0
+AppVersion=2.1
 DefaultDirName={autopf}\MyDM
 DefaultGroupName=MyDM
-OutputBaseFilename=MyDM_Setup
-Compression=lzma2
+OutputBaseFilename=MyDM_Setup_v2.1
+Compression=lzma
 SolidCompression=yes
 
 [Files]
-Source: "dist\MyDM\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion
+Source: "dist\MyDM.exe"; DestDir: "{app}"
+Source: "extension\*"; DestDir: "{app}\extension"; Flags: recursesubdirs
 
 [Icons]
 Name: "{group}\MyDM"; Filename: "{app}\MyDM.exe"
