@@ -2,8 +2,6 @@ name: build
 on:
   push:
   workflow_dispatch:
-  schedule:
-    - cron: "0 3 * * 1"
 jobs:
   build:
     runs-on: windows-latest
@@ -12,12 +10,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install "requests[socks]" tkinterdnd2 "yt-dlp[default]" imageio-ffmpeg pyinstaller
-      - run: Invoke-WebRequest https://github.com/quickjs-ng/quickjs/releases/latest/download/qjs-windows-x86_64.exe -OutFile qjs.exe
-      - run: pyinstaller --noconfirm --noconsole --name MyDM --collect-all tkinterdnd2 --collect-all imageio_ffmpeg --collect-all yt_dlp --collect-all yt_dlp_ejs --hidden-import socks --hidden-import urllib3.contrib.socks --add-binary "qjs.exe;." dm.py
+      - run: pip install "requests[socks]" tkinterdnd2 pyinstaller
+      - run: pyinstaller --noconfirm --noconsole --onefile --name MyDM --collect-all tkinterdnd2 --hidden-import socks --hidden-import urllib3.contrib.socks dm.py
       - run: choco install innosetup -y --no-progress
       - run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss'
       - uses: actions/upload-artifact@v4
         with:
-          name: MyDM-Setup
-          path: Output/MyDM_Setup.exe
+          name: MyDM-Setup-v2.1
+          path: Output/MyDM_Setup_v2.1.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MyDM-Extension-v2.1
+          path: extension
