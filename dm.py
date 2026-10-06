@@ -1,7 +1,8 @@
-import os, re, sys, json, time, shutil, mimetypes, threading, subprocess
+import os, re, sys, json, time, queue, mimetypes, threading, subprocess
 import tkinter as tk
 import tkinter.font as tkfont
 from datetime import datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from tkinter import ttk, filedialog, messagebox
 from urllib.parse import urlparse, unquote
@@ -35,13 +36,15 @@ RUNNING = ("Waiting", "Connecting", "Downloading")
 ACTIONS = ["Do nothing", "Exit MyDM", "Lock screen", "Log off", "Sleep", "Hibernate",
            "Restart", "Shut down", "Shut down (force close apps)"]
 WIN = sys.platform.startswith("win")
+VERSION = "2.1"
+EXT_ID = "njeclpgnkpobfkiefclomnolojaacned"          # fixed ID of the bundled browser extension
+PORTS = range(17890, 17900)
 SCHED = {"start_on": False, "start": "02:00", "stop_on": False, "stop": "07:00",
          "daily": True, "action": "Do nothing", "on_finish": False}
 CFG = {"folder": str(Path.home() / "Downloads"), "segments": 8, "parallel": 3,
        "limit_kb": 0, "proxy_mode": "system", "proxy": "", "watch": True,
        "autostart": False, "subfolders": True, "popup": True, "sound": False,
-       "theme": "system", "geom": "", "sched": dict(SCHED),
-       "ytq": "1080p", "cookies": "", "watch_media": False}
+       "theme": "system", "geom": "", "sched": dict(SCHED), "bridge": True}
 JOBS = []
 FONT, SC = "TkDefaultFont", 1.0
 
@@ -131,124 +134,93 @@ def system_proxy():
         return ""
 
 
-class Cancel(Exception):
-    pass
+# ============================================================ browser bridge
+def ext_dir():
+    base = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else \
+        os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base, "extension")
 
 
-def ytdlp():
+def open_chrome_ext():
+    open_path(ext_dir())
     try:
-        import yt_dlp
-        return yt_dlp
+        if WIN:
+            subprocess.Popen(["cmd", "/c", "start", "", "chrome", "chrome://extensions"],
+                             creationflags=0x08000000)
+        else:
+            subprocess.Popen(["xdg-open", "chrome://extensions"])
     except Exception:
-        return None
+        pass
 
 
-def res_path(name):
-    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
-    p = os.path.join(base, name)
-    return p if os.path.exists(p) else None
+class _Server(ThreadingHTTPServer):
+    allow_reuse_address = False       # on Windows this stops a second program from sharing the port
+    daemon_threads = True
 
 
-def ffmpeg_path():
-    try:
-        import imageio_ffmpeg
-        return imageio_ffmpeg.get_ffmpeg_exe()
-    except Exception:
-        return shutil.which("ffmpeg")
+def start_bridge(inbox):
+    """Tiny local web server (127.0.0.1 only) that the browser extension talks to."""
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
 
+        def host_ok(self):
+            return self.headers.get("Host", "").split(":")[0] in ("127.0.0.1", "localhost")
 
-_IES = []
+        def origin_ok(self):
+            return (CFG["bridge"] and self.host_ok()
+                    and self.headers.get("Origin") == "chrome-extension://" + EXT_ID)
 
+        def reply(self, code, obj=None):
+            body = json.dumps(obj).encode() if obj is not None else b""
+            self.send_response(code)
+            if self.origin_ok():
+                self.send_header("Access-Control-Allow-Origin", self.headers["Origin"])
+                self.send_header("Access-Control-Allow-Private-Network", "true")
+                self.send_header("Access-Control-Allow-Headers", "Content-Type")
+                self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+                self.send_header("Vary", "Origin")
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
 
-def is_media(url):
-    """True when yt-dlp has a dedicated extractor for this link (YouTube, Aparat, ...)."""
-    global _IES
-    if not ytdlp() or os.path.splitext(urlparse(url).path)[1].lstrip(".").lower() in EXTS:
-        return False
-    try:
-        if not _IES:
-            from yt_dlp.extractor import gen_extractor_classes
-            _IES = [c for c in gen_extractor_classes() if c.IE_NAME != "generic"]
-        return any(c.suitable(url) for c in _IES)
-    except Exception:
-        return False
+        def do_OPTIONS(self):
+            self.reply(204 if self.origin_ok() else 403)
 
+        def do_GET(self):
+            if self.path == "/ping" and self.host_ok():
+                self.reply(200, {"app": "MyDM", "version": VERSION})
+            else:
+                self.reply(404)
 
-def ydl_opts(**extra):
-    o = {"quiet": True, "no_warnings": True, "noplaylist": True, "windowsfilenames": True,
-         "socket_timeout": 30, "retries": 5, "fragment_retries": 5}
-    ff = ffmpeg_path()
-    if ff:
-        o["ffmpeg_location"] = ff
-    qjs = res_path("qjs.exe" if WIN else "qjs")
-    if qjs:
-        o["js_runtimes"] = {"quickjs": {"path": qjs}}
-    mode = CFG["proxy_mode"]
-    if mode == "direct":
-        o["proxy"] = ""
-    elif mode == "manual" and CFG["proxy"].strip():
-        p = CFG["proxy"].strip()
-        o["proxy"] = p if "://" in p else "http://" + p
-    if CFG["cookies"]:
-        o["cookiesfrombrowser"] = (CFG["cookies"],)
-    o.update(extra)
-    return o
+        def do_POST(self):
+            if self.path != "/add":
+                return self.reply(404)
+            if not self.origin_ok():
+                return self.reply(403)
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+                if n > 200000:
+                    return self.reply(413)
+                d = json.loads(self.rfile.read(n))
+                m = {k: re.sub(r"[\r\n]+", " ", str(d.get(k) or ""))[:4000]
+                     for k in ("url", "referer", "cookie", "ua", "name", "action")}
+                if not m["url"].startswith(("http://", "https://")):
+                    return self.reply(400)
+            except Exception:
+                return self.reply(400)
+            inbox.put(m)
+            self.reply(200, {"ok": True})
 
-
-def vsel(h, ff):
-    c = f"[height<={h}]" if h else ""
-    if ff:   # separate video + audio streams, merged by ffmpeg (prefers H.264 + AAC = plays everywhere)
-        return f"bv*{c}[vcodec^=avc1]+ba[ext=m4a]/bv*{c}+ba/b{c}"
-    return f"b{c}"
-
-
-def default_choice():
-    q, ff = CFG["ytq"], bool(ffmpeg_path())
-    if q.startswith("Audio"):
-        return ("ba/b", True, ff) if ff else ("ba[ext=m4a]/ba/b", True, False)
-    return vsel(int(q[:-1]) if q[:-1].isdigit() else 0, ff), False, False
-
-
-def quality_options(info, ff):
-    fm = info.get("formats") or []
-    has = lambda f, k: f.get(k) not in (None, "none")
-    size = lambda f: (f.get("filesize") or f.get("filesize_approx") or 0) if f else 0
-    vids = [f for f in fm if has(f, "vcodec") and f.get("height")]
-    auds = [f for f in fm if has(f, "acodec") and not has(f, "vcodec")]
-    aud = max(auds, key=lambda f: f.get("abr") or 0, default=None)
-    opts = []
-    for h in sorted({f["height"] for f in vids}, reverse=True)[:10]:
-        c = [f for f in vids if f["height"] == h]
-        if not ff:
-            c = [f for f in c if has(f, "acodec")]
-            if not c:
-                continue
-        pref = [f for f in c if str(f.get("vcodec")).startswith("avc")] or c
-        b = max(pref, key=lambda f: f.get("tbr") or 0)
-        vc = str(b.get("vcodec"))
-        codec = ("H.264" if vc.startswith("avc") else "VP9" if "vp" in vc else
-                 "AV1" if "av01" in vc else (b.get("ext") or "").upper())
-        sz = size(b) + (0 if has(b, "acodec") else size(aud))
-        opts.append(dict(label=f"{h}p", detail=codec, size=sz, fmt=vsel(h, ff),
-                         audio=False, mp3=False, h=h))
-    dur = info.get("duration") or 0
-    if ff:
-        opts.append(dict(label="Audio only", detail="MP3  192 kbps", size=int(dur * 24000),
-                         fmt="ba/b", audio=True, mp3=True, h=0))
-    if auds or not vids:
-        opts.append(dict(label="Audio only", detail="M4A  original", size=size(aud),
-                         fmt="ba[ext=m4a]/ba/b", audio=True, mp3=False, h=0))
-    return opts
-
-
-def pick_default(opts):
-    q = CFG["ytq"]
-    if q.startswith("Audio"):
-        return next((i for i, o in enumerate(opts) if o["audio"]), 0)
-    if q == "Best" or not q[:-1].isdigit():
-        return 0
-    vid = [i for i, o in enumerate(opts) if not o["audio"]]
-    return next((i for i in vid if opts[i]["h"] <= int(q[:-1])), vid[-1] if vid else 0)
+    for port in PORTS:
+        try:
+            srv = _Server(("127.0.0.1", port), H)
+        except OSError:
+            continue
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        return srv, port
+    return None, 0
 
 
 def open_path(p, select=False):
@@ -421,15 +393,12 @@ LIM = Limiter()
 
 
 class Job:
-    KEYS = ("url", "folder", "name", "path", "total", "ranged", "segs", "status",
-            "kind", "fmt", "audio", "mp3")
+    KEYS = ("url", "folder", "name", "path", "total", "ranged", "segs", "status", "referer")
 
-    def __init__(self, url, folder, media=False):
+    def __init__(self, url, folder):
         self.url, self.folder = url, folder
-        self.kind, self.fmt, self.audio, self.mp3, self.note = (
-            "media" if media else "file", "", False, False, "")
-        self.name = (urlparse(url).netloc.replace("www.", "") + " video" if media else
-                     clean(unquote(os.path.basename(urlparse(url).path))))
+        self.referer, self.cookie, self.ua = "", "", ""
+        self.name = clean(unquote(os.path.basename(urlparse(url).path)))
         self.path, self.total, self.ranged, self.segs = "", 0, False, []
         self.status, self.err = "Queued", None
         self.prev = self.status
@@ -444,8 +413,6 @@ class Job:
 
     @property
     def cat(self):
-        if self.kind == "media":
-            return "Music" if self.audio else "Video"
         return category(self.name)
 
     @property
@@ -466,8 +433,18 @@ class Job:
         j.prev = j.status
         return j
 
+    def hdrs(self):
+        h = dict(UA)
+        if self.ua:
+            h["User-Agent"] = self.ua
+        if self.referer:
+            h["Referer"] = self.referer
+        if self.cookie:
+            h["Cookie"] = self.cookie
+        return h
+
     def probe(self):
-        r = http_get(self.url, headers={**UA, "Range": "bytes=0-0"}, stream=True, timeout=30)
+        r = http_get(self.url, headers={**self.hdrs(), "Range": "bytes=0-0"}, stream=True, timeout=30)
         try:
             r.raise_for_status()
             cr = r.headers.get("Content-Range", "")
@@ -485,10 +462,6 @@ class Job:
     def run(self):
         try:
             self.err = None
-            if self.kind == "media":
-                self.run_media()
-                self.status = "Done"
-                return
             total, ranged, name, ctype = self.probe()
             part = self.path + ".part"
             resume = bool(self.segs and self.ranged and ranged and total == self.total
@@ -535,15 +508,14 @@ class Job:
                 os.replace(self.path + ".part", self.path)
                 self.status = "Done"
         except Exception as ex:
-            self.status = ("Paused" if self.kind == "media" and self.stop.is_set()
-                           else "Error: " + re.sub(r"\x1b\[[0-9;]*m", "", str(ex))[:160])
+            self.status = "Error: " + str(ex)[:60]
 
     def seg(self, s):
         tries = 0
         while not self.stop.is_set() and s[2] <= s[1]:
             before = s[2]
             try:
-                h = {**UA, "Range": f"bytes={s[2]}-{s[1]}"}
+                h = {**self.hdrs(), "Range": f"bytes={s[2]}-{s[1]}"}
                 with http_get(self.url, headers=h, stream=True, timeout=30) as r:
                     if r.status_code != 206:
                         raise IOError(f"HTTP {r.status_code}")
@@ -573,7 +545,7 @@ class Job:
     def single(self):
         s = self.segs[0]
         s[2] = 0
-        with http_get(self.url, headers=UA, stream=True, timeout=30) as r:
+        with http_get(self.url, headers=self.hdrs(), stream=True, timeout=30) as r:
             r.raise_for_status()
             with open(self.path + ".part", "wb") as f:
                 for c in r.iter_content(65536):
@@ -584,58 +556,6 @@ class Job:
                     LIM.wait(len(c), self.stop)
         if self.total and s[2] < self.total:
             raise IOError("connection closed early")
-
-    # ---- video-site downloads through yt-dlp ----
-    def run_media(self):
-        y = ytdlp()
-        if not y:
-            raise RuntimeError("yt-dlp is not included in this build")
-        self.note, self.base, self.expect = "", 0, 0
-        folder = os.path.join(self.folder, self.cat) if CFG["subfolders"] else self.folder
-        os.makedirs(folder, exist_ok=True)
-        o = ydl_opts(format=self.fmt, progress_hooks=[self.hook], postprocessor_hooks=[self.phook],
-                     outtmpl=os.path.join(folder, "%(title).120B [%(id)s].%(ext)s"),
-                     noprogress=True)
-        if self.mp3:
-            o["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3",
-                                    "preferredquality": "192"}]
-        with y.YoutubeDL(o) as ydl:
-            info = ydl.extract_info(self.url, download=True)
-            rd = (info or {}).get("requested_downloads") or []
-            path = rd[0].get("filepath") if rd else ""
-            if not path or not os.path.exists(path):
-                path = ydl.prepare_filename(info)
-        if not os.path.exists(path):
-            raise IOError("downloaded file not found")
-        self.path, self.name, self.note = path, os.path.basename(path), ""
-        self.total = os.path.getsize(path)
-        self.segs = [[0, self.total - 1, self.total]]
-
-    def hook(self, d):
-        if self.stop.is_set():
-            raise Cancel()
-        info = d.get("info_dict") or {}
-        if not self.expect:
-            fs = info.get("requested_formats") or [info]
-            self.expect = sum((f.get("filesize") or f.get("filesize_approx") or 0) for f in fs)
-        if info.get("title") and self.name.endswith(" video"):
-            self.name = clean(info["title"]) + "." + ("mp3" if self.mp3 else info.get("ext") or "mp4")
-        if d.get("status") == "downloading":
-            self.status = "Downloading"
-            cur = d.get("downloaded_bytes") or 0
-            ctot = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
-            self.total = int(max(self.expect, self.base + ctot))
-            self.segs = [[0, max(self.total, 1) - 1, int(min(self.base + cur, max(self.total, 1)))]]
-        elif d.get("status") == "finished":
-            self.base += d.get("total_bytes") or d.get("downloaded_bytes") or 0
-
-    def phook(self, d):
-        if d.get("status") == "started":
-            self.note = {"Merger": "Merging video and audio...",
-                         "ExtractAudio": "Converting to MP3..."}.get(d.get("postprocessor"),
-                                                                     "Finishing...")
-        elif d.get("status") == "finished":
-            self.note = ""
 
 
 # ================================================================== widgets
@@ -838,8 +758,6 @@ class JobList(tk.Canvas):
     # --- drawing
     def sub(self, j):
         d, t = j.done, j.total
-        if j.note and j.status == "Downloading":
-            return j.note
         if j.status == "Done":
             return f"{human(t or d)}  \u00b7  Completed"
         if j.status.startswith("Error"):
@@ -870,8 +788,7 @@ class JobList(tk.Canvas):
         bs = S(44)
         bx, by = x0 + S(14), (y0 + y1) // 2 - bs // 2
         rrect(self, bx, by, bx + bs, by + bs, S(11), fill=CAT_COL[j.cat], outline="")
-        ext = os.path.splitext(j.name)[1].lstrip(".").upper()[:4] or (
-            "MP3" if j.mp3 else "AUD" if j.audio else "VID" if j.kind == "media" else "FILE")
+        ext = os.path.splitext(j.name)[1].lstrip(".").upper()[:4] or "FILE"
         self.create_text(bx + bs // 2, by + bs // 2, text=ext, fill="#ffffff", font=self.fb)
 
         ph, pw, gap = S(28), S(76), S(8)
@@ -1105,13 +1022,12 @@ class BatchDialog(tk.Toplevel):
         for i, u in enumerate(urls):
             p = urlparse(u)
             base = os.path.basename(p.path)
-            vid = is_media(u)
-            name = p.netloc + " video" if vid else clean(unquote(base)) if base else p.netloc
+            name = clean(unquote(base)) if base else p.netloc
             dup = any(j.url == u for j in JOBS)
             k = str(i)
             self.on[k], self.names[k] = not dup, name
             self.tv.insert("", "end", iid=k, text="", values=(
-                "Video" if vid else category(name), p.netloc + ("  (in list)" if dup else "")))
+                category(name), p.netloc + ("  (in list)" if dup else "")))
             self.mark(k)
         self.tv.bind("<Button-1>", self.toggle)
         row = ttk.Frame(f)
@@ -1151,117 +1067,6 @@ class BatchDialog(tk.Toplevel):
         self.destroy()
         if chosen:
             self.app.add_many(chosen, auto=start)
-
-
-class FetchDialog(tk.Toplevel):
-    def __init__(self, app, url):
-        super().__init__(app.root)
-        self.app, self.url, self.res, self.dead = app, url, {}, False
-        self.title("MyDM")
-        self.configure(bg=P["bg"])
-        self.resizable(False, False)
-        self.transient(app.root)
-        f = ttk.Frame(self, padding=S(22))
-        f.pack()
-        ttk.Label(f, text="Getting video information...", font=(FONT, 11, "bold")).pack(anchor="w")
-        ttk.Label(f, text=url if len(url) < 60 else url[:59] + "...", style="Sub.TLabel").pack(
-            anchor="w", pady=(2, S(12)))
-        pb = ttk.Progressbar(f, mode="indeterminate", length=S(380))
-        pb.pack()
-        pb.start(12)
-        ttk.Button(f, text="Cancel", command=self.cancel).pack(anchor="e", pady=(S(14), 0))
-        self.protocol("WM_DELETE_WINDOW", self.cancel)
-        self.update_idletasks()
-        r = app.root
-        self.geometry(f"+{r.winfo_rootx() + max(0, (r.winfo_width() - self.winfo_reqwidth()) // 2)}"
-                      f"+{r.winfo_rooty() + S(120)}")
-        titlebar(self, P["dark"])
-        threading.Thread(target=self.work, daemon=True).start()
-        self.poll()
-
-    def work(self):
-        try:
-            with ytdlp().YoutubeDL(ydl_opts(extract_flat="in_playlist", skip_download=True)) as ydl:
-                self.res["info"] = ydl.sanitize_info(ydl.extract_info(self.url, download=False))
-        except Exception as ex:
-            self.res["err"] = str(ex)
-
-    def cancel(self):
-        self.dead = True
-        self.destroy()
-
-    def poll(self):
-        if self.dead:
-            return
-        if not self.res:
-            self.after(150, self.poll)
-            return
-        self.dead = True
-        self.destroy()
-        if "info" in self.res:
-            self.app.show_media(self.url, self.res["info"])
-            return
-        msg = re.sub(r"\x1b\[[0-9;]*m", "", self.res["err"]).strip()[:350]
-        low = msg.lower()
-        if "sign in" in low or "bot" in low:
-            msg += "\n\nTip: Settings > Browser cookies > Firefox (while logged in to the site)."
-        elif any(k in low for k in ("getaddrinfo", "timed out", "connection", "proxy", "unreachable")):
-            msg += "\n\nTip: if the site is blocked, turn on your VPN / set the proxy in Settings."
-        messagebox.showerror("Could not read this video", msg)
-
-
-class MediaDialog(tk.Toplevel):
-    def __init__(self, app, url, info, opts):
-        super().__init__(app.root)
-        self.app, self.url, self.info, self.opts = app, url, info, opts
-        self.title("Download video")
-        self.configure(bg=P["bg"])
-        self.transient(app.root)
-        f = ttk.Frame(self, padding=S(18))
-        f.pack(fill="both", expand=True)
-        ttk.Label(f, text=info.get("title") or url, font=(FONT, 12, "bold"),
-                  wraplength=S(520)).pack(anchor="w")
-        bits = [info.get("uploader") or info.get("channel") or "",
-                fmt_eta(info["duration"]) if info.get("duration") else ""]
-        ttk.Label(f, text="  \u00b7  ".join(b for b in bits if b), style="Sub.TLabel").pack(
-            anchor="w", pady=(2, S(12)))
-        ttk.Label(f, text="Choose quality", font=(FONT, 10, "bold")).pack(anchor="w", pady=(0, S(4)))
-        self.tv = ttk.Treeview(f, columns=("detail", "size"), show="tree headings",
-                               selectmode="browse", height=min(len(opts), 9))
-        for c, t, w in (("#0", "Quality", 150), ("detail", "Format", 170), ("size", "Size", 110)):
-            self.tv.heading(c, text=t, anchor="w")
-            self.tv.column(c, width=S(w), stretch=c == "#0")
-        for i, o in enumerate(opts):
-            self.tv.insert("", "end", iid=str(i), text="  " + o["label"], values=(
-                o["detail"], ("~" + human(o["size"])) if o["size"] else "-"))
-        self.tv.pack(fill="x")
-        i = str(pick_default(opts))
-        self.tv.selection_set(i)
-        self.tv.focus(i)
-        self.tv.bind("<Double-1>", lambda e: self.go(True))
-        if not ffmpeg_path():
-            ttk.Label(f, style="Sub.TLabel", wraplength=S(520),
-                      text="ffmpeg was not found, so only ready-made files (up to 720p) are offered."
-                      ).pack(anchor="w", pady=(S(8), 0))
-        row = ttk.Frame(f)
-        row.pack(fill="x", pady=(S(16), 0))
-        ttk.Button(row, text="Cancel", command=self.destroy).pack(side="left")
-        ttk.Button(row, text="Download now", style="Accent.TButton",
-                   command=lambda: self.go(True)).pack(side="right")
-        ttk.Button(row, text="Add to list", command=lambda: self.go(False)).pack(side="right", padx=8)
-        self.update_idletasks()
-        r = app.root
-        self.geometry(f"+{r.winfo_rootx() + max(0, (r.winfo_width() - self.winfo_reqwidth()) // 2)}"
-                      f"+{r.winfo_rooty() + S(70)}")
-        titlebar(self, P["dark"])
-        self.attributes("-topmost", True)
-        self.after(400, lambda: self.attributes("-topmost", False))
-
-    def go(self, start):
-        s = self.tv.selection()
-        if s:
-            self.destroy()
-            self.app.add_media(self.url, self.info, self.opts[int(s[0])], start)
 
 
 class Countdown(tk.Toplevel):
@@ -1307,9 +1112,11 @@ class App:
         self.root = root
         self.pops, self.session, self.flt, self.fired = {}, set(), "all", {}
         self.pending, self.closing, self.dragging = None, False, False
+        self.inbox = queue.Queue()
+        self.srv, self.port = start_bridge(self.inbox)
         self.last_clip, self.note, self.note_until, self.ticks = "", "", 0, 0
         self.load()
-        root.title("MyDM")
+        root.title("MyDM " + VERSION)
         root.geometry(CFG["geom"] or f"{S(1160)}x{S(700)}")
         root.minsize(S(940), S(520))
         init_fonts(root)
@@ -1325,7 +1132,8 @@ class App:
         hdr.pack(fill="x")
         self.logo = self.icon.subsample(2, 2)
         ttk.Label(hdr, image=self.logo).pack(side="left")
-        ttk.Label(hdr, text="MyDM", font=(FONT, 15, "bold")).pack(side="left", padx=(S(8), S(16)))
+        ttk.Label(hdr, text="MyDM", font=(FONT, 15, "bold")).pack(side="left", padx=(S(8), S(4)))
+        ttk.Label(hdr, text="v" + VERSION, style="Sub.TLabel").pack(side="left", padx=(0, S(14)))
         self.entry = Hint(hdr, "Paste or drop a link here, then press Enter")
         self.entry.pack(side="left", fill="x", expand=True)
         self.entry.bind("<Return>", lambda e: self.add())
@@ -1387,7 +1195,6 @@ class App:
         root.after(80, lambda: titlebar(root, P["dark"]))
         if "--min" in sys.argv:
             root.iconify()
-        threading.Thread(target=lambda: is_media("https://example.com/x"), daemon=True).start()
         self.tick()
 
     # ---- theme ----
@@ -1434,6 +1241,10 @@ class App:
             CFG["geom"] = f"{self.root.winfo_width()}x{self.root.winfo_height()}"
         except tk.TclError:
             pass
+        try:
+            self.srv and self.srv.server_close()
+        except Exception:
+            pass
         time.sleep(0.4)
         self.save()
         self.root.destroy()
@@ -1449,10 +1260,7 @@ class App:
         new = []
         for u in urls:
             if not any(j.url == u for j in JOBS):
-                m = is_media(u)
-                j = Job(u, CFG["folder"], m)
-                if m:
-                    j.fmt, j.audio, j.mp3 = default_choice()
+                j = Job(u, CFG["folder"])
                 JOBS.append(j)
                 new.append(j)
         self.say(f"{len(new)} new link(s) added" if urls else "No valid link found")
@@ -1466,45 +1274,10 @@ class App:
         urls = list(dict.fromkeys(urls))
         if not urls:
             self.say("No link found")
-        elif len(urls) == 1 and is_media(urls[0]):
-            self.media_flow(urls[0])
         elif len(urls) == 1:
             self.add_many(urls, auto=start)
         else:
             BatchDialog(self, urls, start)
-
-    def media_flow(self, url):
-        if not ytdlp():
-            messagebox.showerror("Video", "yt-dlp is not included in this build.")
-        elif any(j.url == url for j in JOBS):
-            self.say("This video is already in the list")
-        else:
-            FetchDialog(self, url)
-
-    def show_media(self, url, info):
-        if info.get("_type") == "playlist":
-            urls = [e.get("url") or e.get("webpage_url") for e in info.get("entries") or [] if e]
-            urls = [u for u in urls if u and u.startswith("http")]
-            if urls and messagebox.askyesno(
-                    "Playlist", f"\"{info.get('title') or 'Playlist'}\" has {len(urls)} videos.\n\n"
-                                "Add all of them to the list with your default quality?"):
-                self.add_many(urls)
-            return
-        opts = quality_options(info, bool(ffmpeg_path()))
-        if opts:
-            MediaDialog(self, url, info, opts)
-        else:
-            messagebox.showerror("Video", "No downloadable formats were found for this link.")
-
-    def add_media(self, url, info, opt, start):
-        j = Job(url, CFG["folder"], True)
-        j.fmt, j.audio, j.mp3 = opt["fmt"], opt["audio"], opt["mp3"]
-        j.name = clean(info.get("title") or j.name) + (".mp3" if opt["mp3"] else
-                                                       ".m4a" if opt["audio"] else ".mp4")
-        JOBS.append(j)
-        self.save()
-        if start:
-            self.start([j])
 
     def add(self):
         self.offer(self.urls_in(self.entry.value()))
@@ -1531,6 +1304,22 @@ class App:
         with open(p, "w", encoding="utf-8") as f:
             f.write("\n".join(urls))
         self.say(f"{len(urls)} link(s) exported")
+
+    def from_browser(self, m):
+        old = next((j for j in JOBS if j.url == m["url"] and j.status != "Done"), None)
+        if old:
+            self.start([old])
+            self.say("Already in the list")
+            return
+        j = Job(m["url"], CFG["folder"])
+        j.referer, j.cookie, j.ua = m["referer"], m["cookie"], m["ua"]
+        if m["name"]:
+            j.name = clean(m["name"])
+        JOBS.append(j)
+        self.save()
+        self.say("Added from the browser: " + j.name)
+        if m["action"] != "queue":
+            self.start([j])
 
     def drag(self, on):
         if on != self.lst.drop:
@@ -1752,20 +1541,17 @@ class App:
         section(14, "Clipboard")
         check(15, "Watch clipboard for download links", "watch")
         check(16, "Start automatically when links are caught", "autostart")
-        section(17, "Videos (YouTube and other sites)")
-        ttk.Label(f, text="Default quality").grid(row=18, column=0, sticky="w", pady=S(3))
-        vs["ytq"] = tk.StringVar(value=CFG["ytq"])
-        ttk.Combobox(f, textvariable=vs["ytq"], state="readonly", width=14,
-                     values=["Best", "1080p", "720p", "480p", "360p", "Audio (MP3)"]).grid(
-            row=18, column=1, sticky="w")
-        ttk.Label(f, text="Browser cookies").grid(row=19, column=0, sticky="w", pady=S(3))
-        vs["cookies"] = tk.StringVar(value=CFG["cookies"] or "none")
-        ttk.Combobox(f, textvariable=vs["cookies"], state="readonly", width=14,
-                     values=["none", "firefox", "edge", "chrome", "brave"]).grid(
-            row=19, column=1, sticky="w")
-        check(20, "Offer a video download for video links copied to the clipboard", "watch_media")
-        ttk.Label(f, style="Sub.TLabel", wraplength=S(430), text=self.video_status()).grid(
-            row=21, column=0, columnspan=3, sticky="w", pady=(S(4), 0))
+        section(17, "Browser extension")
+        check(18, "Accept downloads sent from the browser extension", "bridge")
+        ttk.Label(f, style="Sub.TLabel", wraplength=S(430), text=(
+            f"MyDM {VERSION}   |   " + (f"listening on 127.0.0.1:{self.port}" if self.port
+                                        else "could not open a local port"))).grid(
+            row=19, column=0, columnspan=3, sticky="w")
+        br = ttk.Frame(f)
+        br.grid(row=20, column=0, columnspan=3, sticky="w", pady=(S(6), 0))
+        ttk.Button(br, text="Open extension folder", command=lambda: open_path(ext_dir())).pack(side="left")
+        ttk.Button(br, text="Open Chrome extensions page", command=open_chrome_ext).pack(
+            side="left", padx=6)
 
         def ok():
             try:
@@ -1781,9 +1567,7 @@ class App:
                        proxy_mode=next(k for k, v in modes.items() if v == vs["mode"].get()),
                        subfolders=vs["subfolders"].get(), popup=vs["popup"].get(),
                        sound=vs["sound"].get(), watch=vs["watch"].get(),
-                       autostart=vs["autostart"].get(), ytq=vs["ytq"].get(),
-                       cookies="" if vs["cookies"].get() == "none" else vs["cookies"].get(),
-                       watch_media=vs["watch_media"].get())
+                       autostart=vs["autostart"].get(), bridge=vs["bridge"].get())
             if WIN and getattr(sys, "frozen", False):
                 set_startup(vs["startup"].get())
             self.save()
@@ -1791,19 +1575,10 @@ class App:
             w.destroy()
 
         row = ttk.Frame(f)
-        row.grid(row=22, column=0, columnspan=3, sticky="e", pady=(S(16), 0))
+        row.grid(row=21, column=0, columnspan=3, sticky="e", pady=(S(16), 0))
         ttk.Button(row, text="Cancel", command=w.destroy).pack(side="left", padx=6)
         ttk.Button(row, text="Save", style="Accent.TButton", command=ok).pack(side="left")
         self.place_dialog(w)
-
-    def video_status(self):
-        y = ytdlp()
-        if not y:
-            return "Video downloads: yt-dlp is missing in this build."
-        v = getattr(getattr(y, "version", None), "__version__", "?")
-        js = res_path("qjs.exe" if WIN else "qjs") or shutil.which("deno")
-        return (f"yt-dlp {v}   |   ffmpeg: {'ok' if ffmpeg_path() else 'missing'}   |   "
-                f"JS engine: {'ok' if js else 'missing (YouTube may fail)'}")
 
     def place_dialog(self, w):
         w.update_idletasks()
@@ -1926,6 +1701,11 @@ class App:
         now = time.monotonic()
         self.ticks += 1
         self.sched_check()
+        while True:
+            try:
+                self.from_browser(self.inbox.get_nowait())
+            except queue.Empty:
+                break
         active = [j for j in JOBS if j.status in ("Connecting", "Downloading")]
         for j in JOBS:
             if j.status == "Waiting" and len(active) < CFG["parallel"]:
@@ -1950,8 +1730,6 @@ class App:
                 known = [u for u in urls if os.path.splitext(urlparse(u).path)[1].lstrip(".").lower() in EXTS]
                 if len(urls) == 1 and known:
                     self.add_many(known, auto=CFG["autostart"])
-                elif len(urls) == 1 and CFG["watch_media"] and is_media(urls[0]):
-                    self.media_flow(urls[0])
                 elif len(urls) > 1:
                     if CFG["autostart"]:
                         self.add_many(urls, auto=True)
