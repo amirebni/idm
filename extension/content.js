@@ -1,4 +1,4 @@
-// MyDM Downloader 2.1 - content script
+// MyDM Downloader 2.2 - content script
 (() => {
   if (window.__mydmLoaded) return;
   window.__mydmLoaded = true;
@@ -6,9 +6,11 @@
   const L = {
     fa: { dir: "rtl", video: "می‌خواهید این ویدیو را دانلود کنید؟", audio: "می‌خواهید این موسیقی را دانلود کنید؟",
           dl: "دانلود", later: "بعداً", never: "برای این سایت نشان نده", sent: "به MyDM ارسال شد ✓",
+          sentSite: "در MyDM باز شد؛ کیفیت را آنجا انتخاب کنید ✓",
           fail: "برنامهٔ MyDM باز نیست.", browser: "دانلود با مرورگر" },
     en: { dir: "ltr", video: "Download this video?", audio: "Download this music?",
           dl: "Download", later: "Not now", never: "Don't ask on this site", sent: "Sent to MyDM ✓",
+          sentSite: "Opened in MyDM - choose the quality there ✓",
           fail: "MyDM is not running.", browser: "Download with browser" },
   };
   const SKIP = new Set(["m3u8", "mpd", "ts", "m4s"]);
@@ -54,6 +56,11 @@
     if (cfg.blocked.includes(location.hostname)) return;
     if (el.muted && (el.loop || el.autoplay)) return;        // decorative background video
     if (isFinite(el.duration) && el.duration < 15) return;   // UI sounds, tiny clips
+    const media = el.tagName === "AUDIO" ? "audio" : "video";
+    try {
+      const r = await chrome.runtime.sendMessage({ type: "supports", url: location.href });
+      if (r && r.site) return offer(el, { url: location.href, media, mode: "site", ext: "", size: 0 });
+    } catch (e) { /* extension reloaded */ }
     for (let i = 0; i < 6; i++) {
       const c = await pick(el);
       if (c) return offer(el, c);
@@ -62,18 +69,23 @@
   }
 
   async function pick(el) {
-    const kind = el.tagName === "AUDIO" ? "audio" : "video";
+    const media = el.tagName === "AUDIO" ? "audio" : "video";
     const direct = el.currentSrc || el.src || "";
     if (/^https?:/i.test(direct) && !SKIP.has(extOf(direct))) {
-      return { url: direct, kind, ext: extOf(direct), size: 0 };
+      return { url: direct, media, mode: "file", ext: extOf(direct), size: 0 };
     }
     let list = [];
     try { list = (await chrome.runtime.sendMessage({ type: "media" })) || []; } catch (e) { return null; }
     const recent = list.filter((x) => Date.now() - x.t < 180000);
-    const same = recent.filter((x) => x.kind === kind);
-    const pool = same.length ? same : recent;
-    pool.sort((a, b) => b.size - a.size || b.t - a.t);
-    return pool[0] || null;
+    const files = recent.filter((x) => !x.stream && x.kind === media).sort((a, b) => b.size - a.size || b.t - a.t);
+    // players ask for the master playlist first: prefer one seen in the last 30 s (earliest), else the newest
+    const fresh = recent.filter((x) => x.stream && Date.now() - x.t < 30000);
+    const streams = fresh.length ? fresh.sort((a, b) => (b.master - a.master) || a.t - b.t)
+                                 : recent.filter((x) => x.stream).sort((a, b) => (b.master - a.master) || b.t - a.t);
+    const f = files[0], st = streams[0];
+    // a big plain file wins; otherwise take the stream (HLS/DASH) the player is using
+    const x = f && (f.size >= 3145728 || !st) ? f : st || f;
+    return x ? { url: x.url, media: x.kind, mode: x.stream ? "stream" : "file", ext: x.ext, size: x.size } : null;
   }
 
   function offer(el, c) {
@@ -96,14 +108,14 @@
     bar.className = "bar";
     bar.dir = t.dir;
     const title = (document.title || "").replace(/\s+/g, " ").trim().slice(0, 120);
-    const ext = c.ext || (c.kind === "audio" ? "mp3" : "mp4");
+    const ext = c.mode === "stream" ? "mp4" : c.ext || (c.media === "audio" ? "mp3" : "mp4");
     const name = title ? title + "." + ext : "";
-    const shown = name || decodeURIComponent(c.url.split("?")[0].split("/").pop() || "");
+    const shown = c.mode === "site" ? title : name || decodeURIComponent(c.url.split("?")[0].split("/").pop() || "");
     bar.innerHTML = `<div class="logo">${ICON}</div>
       <div class="txt"><div class="t1"></div><div class="t2"></div></div>
       <span class="acts"></span><button class="x" title="×">×</button><div class="prog"></div>`;
     const $ = (s) => bar.querySelector(s);
-    $(".t1").textContent = c.kind === "audio" ? t.audio : t.video;
+    $(".t1").textContent = c.media === "audio" ? t.audio : t.video;
     $(".t2").textContent = shown + (c.size ? "  ·  " + fmtSize(c.size) : "");
     const acts = $(".acts");
     const mk = (cls, text, fn) => { const b = document.createElement("button"); if (cls) b.className = cls; b.textContent = text; b.onclick = fn; return b; };
@@ -144,12 +156,12 @@
       let res = null;
       try {
         res = await chrome.runtime.sendMessage({ type: "download", url: c.url, referer: location.href,
-                                                  name, action: "start" });
+                                                  name, action: "start", kind: c.mode });
       } catch (e) { /* extension reloaded */ }
       const t1 = $(".t1");
       if (res && res.ok) {
-        t1.className = "t1 ok"; t1.textContent = t.sent;
-        setTimeout(close, 2200);
+        t1.className = "t1 ok"; t1.textContent = c.mode === "site" ? t.sentSite : t.sent;
+        setTimeout(close, 3000);
       } else {
         t1.className = "t1 err"; t1.textContent = t.fail;
         acts.append(mk("pri", t.browser, () => {
