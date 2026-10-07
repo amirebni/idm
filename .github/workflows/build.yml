@@ -2,6 +2,8 @@ name: build
 on:
   push:
   workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * 1"
 jobs:
   build:
     runs-on: windows-latest
@@ -12,13 +14,22 @@ jobs:
           python-version: "3.12"
       - run: pip install "requests[socks]" tkinterdnd2 pyinstaller
       - run: pyinstaller --noconfirm --noconsole --onefile --name MyDM --collect-all tkinterdnd2 --hidden-import socks --hidden-import urllib3.contrib.socks dm.py
+      - name: Download helper programs
+        shell: pwsh
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          Invoke-WebRequest https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -OutFile yt-dlp
+          Invoke-WebRequest https://github.com/quickjs-ng/quickjs/releases/latest/download/qjs-windows-x86_64.exe -OutFile qjs.exe
+          Invoke-WebRequest https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip -OutFile ffmpeg.zip
+          Expand-Archive ffmpeg.zip -DestinationPath ffmpeg-tmp
+          Copy-Item (Get-ChildItem ffmpeg-tmp -Recurse -Filter ffmpeg.exe | Select-Object -First 1).FullName ffmpeg.exe
       - run: choco install innosetup -y --no-progress
       - run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss'
       - uses: actions/upload-artifact@v4
         with:
-          name: MyDM-Setup-v2.1
-          path: Output/MyDM_Setup_v2.1.exe
+          name: MyDM-Setup-v2.2
+          path: Output/MyDM_Setup_v2.2.exe
       - uses: actions/upload-artifact@v4
         with:
-          name: MyDM-Extension-v2.1
+          name: MyDM-Extension-v2.2
           path: extension
