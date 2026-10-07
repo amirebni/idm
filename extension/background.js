@@ -1,4 +1,4 @@
-// MyDM Downloader 2.1 - background service worker
+// MyDM Downloader 2.2 - background service worker
 const PORTS = [17890, 17891, 17892, 17893, 17894, 17895, 17896, 17897, 17898, 17899];
 const MEDIA_EXT = new Set(["mp4", "m4v", "webm", "mkv", "mov", "avi", "flv", "wmv",
   "mp3", "m4a", "aac", "ogg", "oga", "opus", "wav", "flac"]);
@@ -26,28 +26,51 @@ function remember(tabId, item) {
   }).catch(() => {});
 }
 
+function skipped(tabId, url, why) {
+  chain = chain.then(async () => {
+    const key = "s" + tabId;
+    const got = await chrome.storage.session.get(key);
+    const list = (got[key] || []).filter((x) => x.url !== url);
+    list.push({ url, why, t: Date.now() });
+    await chrome.storage.session.set({ [key]: list.slice(-12) });
+  }).catch(() => {});
+}
+
+// HLS / DASH manifests: remember them, and note whether it is the "master" (quality list) one
+async function addManifest(d, type) {
+  let master = /dash\+xml/.test(type);
+  try {
+    const text = await (await fetch(d.url, { credentials: "include" })).text();
+    master = master || text.includes("#EXT-X-STREAM-INF") || text.includes("<MPD");
+  } catch (e) { /* keep the guess */ }
+  remember(d.tabId, { url: d.url, type, size: 0, ext: "mp4", kind: "video", stream: true, master, t: Date.now() });
+}
+
 chrome.webRequest.onHeadersReceived.addListener((d) => {
   if (d.tabId < 0 || (d.statusCode !== 200 && d.statusCode !== 206)) return;
   const h = {};
   for (const x of d.responseHeaders || []) h[x.name.toLowerCase()] = x.value || "";
   const type = (h["content-type"] || "").split(";")[0].trim().toLowerCase();
   const ext = extOf(d.url);
+  if (/mpegurl|dash\+xml/.test(type) || ext === "m3u8" || ext === "mpd") { addManifest(d, type); return; }
   const generic = type === "" || type === "application/octet-stream" || type === "binary/octet-stream";
   const isMedia = type.startsWith("video/") || type.startsWith("audio/") || (generic && MEDIA_EXT.has(ext));
-  if (!isMedia || SKIP_EXT.has(ext) || /mpegurl|dash\+xml/.test(type)) return;
+  if (!isMedia) return;
+  if (SKIP_EXT.has(ext)) { skipped(d.tabId, d.url, "seg"); return; }
   // adaptive-streaming pieces (YouTube etc.) are not complete files
-  if (/googlevideo\.com\/videoplayback/.test(d.url) || /[?&](range|bytestart)=/i.test(d.url)) return;
+  if (/googlevideo\.com\/videoplayback/.test(d.url)) { skipped(d.tabId, d.url, "yt"); return; }
+  if (/[?&](range|bytestart)=/i.test(d.url)) { skipped(d.tabId, d.url, "chunk"); return; }
   let size = 0;
   const cr = h["content-range"];
   if (cr && /\/(\d+)$/.test(cr)) size = +RegExp.$1;
   else if (h["content-length"] && d.statusCode === 200) size = +h["content-length"];
-  if (size && size < 150 * 1024) return;           // UI sounds, tiny clips
+  if (size && size < 150 * 1024) { skipped(d.tabId, d.url, "small"); return; }   // UI sounds, tiny clips
   const kind = type.startsWith("audio/") || AUDIO_EXT.has(ext) ? "audio" : "video";
   remember(d.tabId, { url: d.url, type, size, ext: TYPE_EXT[type] || ext, kind, t: Date.now() });
 }, { urls: ["<all_urls>"], types: ["media", "xmlhttprequest", "other"] }, ["responseHeaders"]);
 
-chrome.tabs.onRemoved.addListener((id) => chrome.storage.session.remove("m" + id));
-chrome.tabs.onUpdated.addListener((id, info) => { if (info.url) chrome.storage.session.remove("m" + id); });
+chrome.tabs.onRemoved.addListener((id) => chrome.storage.session.remove(["m" + id, "s" + id]));
+chrome.tabs.onUpdated.addListener((id, info) => { if (info.url) chrome.storage.session.remove(["m" + id, "s" + id]); });
 
 // ---------- talk to the MyDM desktop app ----------
 async function findApp() {
@@ -66,6 +89,24 @@ async function findApp() {
   return null;
 }
 
+// does the app's video engine (yt-dlp) know this page? (YouTube, Aparat, Varzesh3, ...)
+const supCache = new Map();
+async function supports(url) {
+  const c = supCache.get(url);
+  if (c && Date.now() - c.t < 60000) return c.v;
+  const app = await findApp();
+  let v = false;
+  if (app) {
+    try {
+      const r = await fetch(`http://127.0.0.1:${app.port}/supports`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url }) });
+      v = !!(await r.json()).site;
+    } catch (e) { /* not supported */ }
+  }
+  supCache.set(url, { v, t: Date.now() });
+  return v;
+}
+
 async function sendToApp(m) {
   const app = await findApp();
   if (!app) return { ok: false, error: "not-running" };
@@ -79,7 +120,7 @@ async function sendToApp(m) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ url: m.url, referer: m.referer || "", cookie, ua: navigator.userAgent,
-                             name: m.name || "", action: m.action || "start" }),
+                             name: m.name || "", action: m.action || "start", kind: m.kind || "file" }),
     });
     return { ok: r.ok, error: r.ok ? "" : "refused" };
   } catch (e) { return { ok: false, error: "failed" }; }
@@ -92,6 +133,12 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
     return true;
   }
   if (msg.type === "download") { sendToApp(msg).then(reply); return true; }
+  if (msg.type === "supports") { supports(msg.url).then((site) => reply({ site })); return true; }
+  if (msg.type === "skipped") {
+    const id = msg.tabId != null ? msg.tabId : sender.tab && sender.tab.id;
+    chrome.storage.session.get("s" + id).then((g) => reply(g["s" + id] || []));
+    return true;
+  }
   if (msg.type === "ping") { findApp().then((a) => reply(a || null)); return true; }
   if (msg.type === "browserDownload") {
     chrome.downloads.download({ url: msg.url }).then(() => reply({ ok: true }), () => reply({ ok: false }));
