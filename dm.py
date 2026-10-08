@@ -8,16 +8,22 @@ from tkinter import ttk, filedialog, messagebox
 from urllib.parse import urlparse, unquote, urljoin
 import requests
 
-try:   # standard-library modules that yt-dlp needs when it is loaded from its zip file;
-    # listing them here makes PyInstaller keep them inside the exe
-    import sqlite3, netrc, optparse, gzip, zlib, bz2, lzma, uuid, secrets, hmac, ssl, shlex, struct
-    import tempfile, textwrap, getpass, platform, ctypes, html.parser, html.entities, http.cookiejar
-    import http.cookies, http.client, xml.etree.ElementTree, xml.dom.minidom, xml.sax, email.utils
-    import urllib.request, urllib.error, base64, binascii, hashlib, dataclasses, fractions, decimal
-    import unicodedata, calendar, difflib, random, zipfile, zipimport, pkgutil, runpy, importlib.util
-    import concurrent.futures, asyncio, logging, ast, inspect, socketserver, selectors
-except Exception:
-    pass
+def _bundled_modules():
+    """Never called. It only lists every standard-library module that yt-dlp (loaded from its zip
+    file at run time) can use, so that PyInstaller keeps them inside the exe."""
+    import _winapi, abc, array, asyncio, atexit, base64, binascii, bisect, calendar, codecs
+    import collections, collections.abc, concurrent.futures, contextlib, contextvars, copy
+    import ctypes, ctypes.util, ctypes.wintypes, dataclasses, datetime, email.header
+    import email.message, email.parser, email.utils, encodings.idna, encodings.utf_8_sig, enum
+    import errno, fcntl, fileinput, functools, getpass, glob, hashlib, heapq, hmac
+    import html.entities, html.parser, http, http.client, http.cookiejar, http.cookies
+    import http.server, importlib, importlib.abc, importlib.machinery, importlib.resources
+    import importlib.util, inspect, io, itertools, locale, logging, math, mimetypes, msvcrt
+    import netrc, operator, optparse, pathlib, pkgutil, platform, pty, quopri, random, secrets
+    import shlex, signal, socket, sqlite3, ssl, string, struct, sysconfig, tempfile, textwrap
+    import tokenize, traceback, types, typing, unicodedata, urllib, urllib.error, urllib.parse
+    import urllib.request, urllib.response, uuid, warnings, winreg, xml.etree.ElementTree
+    import zipfile, zipimport, zlib
 
 try:
     from tkinterdnd2 import TkinterDnD, DND_TEXT, DND_FILES
@@ -47,7 +53,7 @@ RUNNING = ("Waiting", "Connecting", "Downloading")
 ACTIONS = ["Do nothing", "Exit MyDM", "Lock screen", "Log off", "Sleep", "Hibernate",
            "Restart", "Shut down", "Shut down (force close apps)"]
 WIN = sys.platform.startswith("win")
-VERSION = "2.2"
+VERSION = "2.3"
 EXT_ID = "njeclpgnkpobfkiefclomnolojaacned"          # fixed ID of the bundled browser extension
 PORTS = range(17890, 17900)
 SCHED = {"start_on": False, "start": "02:00", "stop_on": False, "stop": "07:00",
@@ -168,32 +174,36 @@ def ffmpeg_path():
     return find("ffmpeg.exe" if WIN else "ffmpeg") or shutil.which("ffmpeg")
 
 
-_YT = [None, False]
+_YT = [None, False, ""]
+_YT_LOCK = threading.Lock()
 
 
 def ytdlp():
     """yt-dlp is a single zip file next to the program (or a newer one in the user folder),
     so it can be updated from inside the app without rebuilding anything."""
-    if _YT[1]:
+    with _YT_LOCK:
+        if _YT[1]:
+            return _YT[0]
+        _YT[1] = True
+        _YT[2] = "the file 'yt-dlp' was not found next to MyDM.exe"
+        for p in (str(DATA / "yt-dlp"), os.path.join(app_dir(), "yt-dlp")):
+            if os.path.isfile(p):
+                sys.path.insert(0, p)
+                try:
+                    import yt_dlp
+                    _YT[0] = yt_dlp
+                    return yt_dlp
+                except Exception as ex:
+                    _YT[2] = f"{type(ex).__name__}: {ex}"
+                    sys.path.remove(p)
+                    for k in [k for k in sys.modules if k.startswith("yt_dlp")]:
+                        del sys.modules[k]
+        try:
+            import yt_dlp
+            _YT[0] = yt_dlp
+        except Exception:
+            pass
         return _YT[0]
-    _YT[1] = True
-    for p in (str(DATA / "yt-dlp"), os.path.join(app_dir(), "yt-dlp")):
-        if os.path.isfile(p):
-            sys.path.insert(0, p)
-            try:
-                import yt_dlp
-                _YT[0] = yt_dlp
-                return yt_dlp
-            except Exception:
-                sys.path.remove(p)
-                for k in [k for k in sys.modules if k.startswith("yt_dlp")]:
-                    del sys.modules[k]
-    try:
-        import yt_dlp
-        _YT[0] = yt_dlp
-    except Exception:
-        pass
-    return _YT[0]
 
 
 def update_engine():
@@ -322,6 +332,29 @@ def pick_default(opts):
     return next((i for i in vid if opts[i]["h"] <= int(q[:-1])), vid[-1] if vid else 0)
 
 
+def hls_choices(job):
+    """Quality list of an HLS master playlist (empty = nothing to choose, just take the best)."""
+    try:
+        text = http_get(job.url, headers=job.hdrs(), timeout=20).text
+        if "#EXT-X-STREAM-INF" not in text:
+            return []
+        dur = job.stream_info()
+        opts = []
+        for i, m in enumerate(re.finditer(r"#EXT-X-STREAM-INF:([^\n]*)", text)):
+            a = m.group(1)
+            bw = int((re.search(r"BANDWIDTH=(\d+)", a) or [0, 0])[1])
+            r = re.search(r"RESOLUTION=(\d+)x(\d+)", a)
+            hh = int(r.group(2)) if r else 0
+            opts.append(dict(label=f"{hh}p" if hh else f"{bw // 1000} kbps",
+                             detail=(f"{r.group(1)}x{hh}   " if r else "") + f"{bw / 1e6:.1f} Mbps",
+                             size=int(bw * dur / 8), fmt=f"p:{i}", audio=False, mp3=False,
+                             h=hh or bw // 1000, bw=bw))
+        opts.sort(key=lambda o: (o["h"], o["bw"]), reverse=True)
+        return opts if len(opts) > 1 else []
+    except Exception:
+        return []
+
+
 def stem(name):
     base, ext = os.path.splitext(name)
     return base if ext.lower() in (".mp4", ".mkv", ".webm", ".m4a", ".mp3", ".ts") else name
@@ -381,7 +414,7 @@ def start_bridge(inbox):
 
         def do_GET(self):
             if self.path == "/ping" and self.host_ok():
-                self.reply(200, {"app": "MyDM", "version": VERSION})
+                self.reply(200, {"app": "MyDM", "version": VERSION, "engine": bool(ytdlp())})
             else:
                 self.reply(404)
 
@@ -402,7 +435,7 @@ def start_bridge(inbox):
             except Exception:
                 return self.reply(400)
             if self.path == "/supports":
-                return self.reply(200, {"site": is_media(m["url"])})
+                return self.reply(200, {"site": is_media(m["url"]), "engine": bool(ytdlp())})
             inbox.put(m)
             self.reply(200, {"ok": True})
 
@@ -860,7 +893,10 @@ class Job:
                "".join(f"{k}: {v}\r\n" for k, v in h.items())]
         if http_proxy():
             cmd += ["-http_proxy", http_proxy()]
-        cmd += ["-i", self.url, "-sn", "-dn", "-c", "copy", "-f", "mp4", tmp]
+        cmd += ["-i", self.url]
+        if self.fmt.startswith("p:"):                 # a quality picked from the master playlist
+            cmd += ["-map", "0:" + self.fmt]
+        cmd += ["-sn", "-dn", "-c", "copy", "-f", "mp4", tmp]
         self.status, self.segs, self.total = "Downloading", [[0, 2 ** 62, 0]], 0
         p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                              encoding="utf-8", errors="replace",
@@ -1414,9 +1450,10 @@ class BatchDialog(tk.Toplevel):
 
 
 class FetchDialog(tk.Toplevel):
-    def __init__(self, app, url):
+    def __init__(self, app, url, fn=None, then=None):
         super().__init__(app.root)
         self.app, self.url, self.res, self.dead = app, url, {}, False
+        self.fn, self.then = fn, then
         self.title("MyDM")
         self.configure(bg=P["bg"])
         self.resizable(False, False)
@@ -1441,8 +1478,11 @@ class FetchDialog(tk.Toplevel):
 
     def work(self):
         try:
-            with ytdlp().YoutubeDL(ydl_opts(extract_flat="in_playlist", skip_download=True)) as ydl:
-                self.res["info"] = ydl.sanitize_info(ydl.extract_info(self.url, download=False))
+            if self.fn:
+                self.res["info"] = self.fn()
+            else:
+                with ytdlp().YoutubeDL(ydl_opts(extract_flat="in_playlist", skip_download=True)) as ydl:
+                    self.res["info"] = ydl.sanitize_info(ydl.extract_info(self.url, download=False))
         except Exception as ex:
             self.res["err"] = str(ex)
 
@@ -1459,7 +1499,7 @@ class FetchDialog(tk.Toplevel):
         self.dead = True
         self.destroy()
         if "info" in self.res:
-            self.app.show_media(self.url, self.res["info"])
+            (self.then or self.app.show_media)(self.url, self.res["info"])
             return
         msg = re.sub(r"\x1b\[[0-9;]*m", "", self.res["err"]).strip()[:350]
         low = msg.lower()
@@ -1742,7 +1782,7 @@ class App:
 
     def media_flow(self, url):
         if not ytdlp():
-            messagebox.showerror("Video", "The video engine (yt-dlp) is missing.")
+            messagebox.showerror("Video", "The video engine did not load:\n" + _YT[2])
         elif any(j.url == url for j in JOBS):
             self.say("This video is already in the list")
         else:
@@ -1764,10 +1804,14 @@ class App:
             messagebox.showerror("Video", "No downloadable formats were found for this link.")
 
     def add_media(self, url, info, opt, start):
-        j = Job(url, CFG["folder"], "media")
-        j.fmt, j.audio, j.mp3 = opt["fmt"], opt["audio"], opt["mp3"]
-        j.name = clean(info.get("title") or j.name) + (".mp3" if opt["mp3"] else
-                                                       ".m4a" if opt["audio"] else ".mp4")
+        j = info.get("_job")
+        if j:                                          # HLS stream with the chosen quality
+            j.fmt = opt["fmt"]
+        else:
+            j = Job(url, CFG["folder"], "media")
+            j.fmt, j.audio, j.mp3 = opt["fmt"], opt["audio"], opt["mp3"]
+            j.name = clean(info.get("title") or j.name) + (".mp3" if opt["mp3"] else
+                                                           ".m4a" if opt["audio"] else ".mp4")
         JOBS.append(j)
         self.save()
         if start:
@@ -1814,6 +1858,20 @@ class App:
         j.referer, j.cookie, j.ua = m["referer"], m["cookie"], m["ua"]
         if m["name"]:
             j.name = clean(m["name"])
+        if j.kind == "stream":                         # ask which quality, if the stream offers several
+            def then(u, info):
+                if info["opts"]:
+                    self.root.deiconify()
+                    MediaDialog(self, u, {"title": j.name, "uploader": "HLS stream", "_job": j},
+                                info["opts"])
+                else:
+                    JOBS.append(j)
+                    self.save()
+                    self.say("Added from the browser: " + j.name)
+                    if m["action"] != "queue":
+                        self.start([j])
+            FetchDialog(self, url, lambda: {"opts": hls_choices(j)}, then)
+            return
         JOBS.append(j)
         self.save()
         self.say("Added from the browser: " + j.name)
@@ -1984,7 +2042,7 @@ class App:
     # ---- settings ----
     def video_status(self):
         y = ytdlp()
-        v = getattr(getattr(y, "version", None), "__version__", "?") if y else "not found"
+        v = getattr(getattr(y, "version", None), "__version__", "?") if y else "NOT LOADED - " + _YT[2]
         js = find("qjs.exe" if WIN else "qjs") or shutil.which("deno")
         return (f"Video engine (yt-dlp): {v}\nffmpeg: {'ok' if ffmpeg_path() else 'missing'}     "
                 f"JS engine: {'ok' if js else 'missing (YouTube may fail)'}")
@@ -2072,7 +2130,7 @@ class App:
         ttk.Label(v, style="Sub.TLabel", text="Needed when a site says \"sign in to confirm you're not a bot\".").grid(
             row=2, column=1, sticky="w")
         check(v, 3, "Offer a video download for video links copied to the clipboard", "watch_media")
-        ttk.Label(v, style="Sub.TLabel", justify="left", text=self.video_status()).grid(
+        ttk.Label(v, style="Sub.TLabel", justify="left", wraplength=S(520), text=self.video_status()).grid(
             row=4, column=0, columnspan=3, sticky="w", pady=(S(10), S(4)))
         ub = ttk.Frame(v)
         ub.grid(row=5, column=0, columnspan=3, sticky="w")
