@@ -1,13 +1,13 @@
-// MyDM Downloader 2.2 - toolbar popup
+// MyDM Downloader 2.3 - toolbar popup
 const T = {
   fa: { found: "یافت‌شده در این صفحه", none: "هنوز ویدیو یا موسیقی‌ای پخش نشده است. یکی را پخش کنید.",
         set: "تنظیمات", enabled: "نمایش نوار دانلود هنگام پخش", block: "برای این سایت نشان نده", lang: "زبان",
-        on: "MyDM متصل است", off: "MyDM باز نیست", dl: "دانلود", sent: "ارسال شد ✓", fail: "ارسال نشد",
+        on: "MyDM متصل است", off: "MyDM باز نیست", noEngine: "موتور ویدیویی غیرفعال", dl: "دانلود", sent: "ارسال شد ✓", fail: "ارسال نشد",
         note: "اگر صفحه ویدیو را به‌صورت قطعه‌قطعه پخش کند (مثل یوتیوب)، MyDM آن را از طریق موتور ویدیویی خودش می‌گیرد.",
         skipped: "ردشده (چرا نوار نیامد)", why: { seg: "قطعهٔ استریم", yt: "قطعهٔ استریم یوتیوب", chunk: "بخشی از فایل", small: "فایل خیلی کوچک" } },
   en: { found: "Found on this page", none: "No video or music has played yet. Play one.",
         set: "Settings", enabled: "Show the download bar when media plays", block: "Don't ask on this site", lang: "Language",
-        on: "MyDM connected", off: "MyDM is not running", dl: "Download", sent: "Sent ✓", fail: "Failed",
+        on: "MyDM connected", off: "MyDM is not running", noEngine: "video engine off", dl: "Download", sent: "Sent ✓", fail: "Failed",
         note: "If a page plays video in pieces (like YouTube), MyDM fetches it with its own video engine.",
         skipped: "Skipped (why no bar)", why: { seg: "stream segment", yt: "YouTube stream piece", chunk: "part of a file", small: "tiny file" } },
 };
@@ -36,7 +36,7 @@ const fmt = (n) => n >= 1073741824 ? (n / 1073741824).toFixed(1) + " GB" : n >= 
 
   chrome.runtime.sendMessage({ type: "ping" }, (app) => {
     $("dot").className = "dot " + (app ? "on" : "off");
-    $("st").textContent = app ? t.on + " (v" + app.version + ")" : t.off;
+    $("st").textContent = app ? t.on + " (v" + app.version + ")" + (app.engine ? "" : " - " + t.noEngine) : t.off;
   });
 
   const list = (await chrome.runtime.sendMessage({ type: "media", tabId: tab.id })) || [];
