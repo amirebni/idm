@@ -1,4 +1,4 @@
-// MyDM Downloader 2.2 - content script
+// MyDM Downloader 2.3 - content script
 (() => {
   if (window.__mydmLoaded) return;
   window.__mydmLoaded = true;
@@ -7,13 +7,16 @@
     fa: { dir: "rtl", video: "می‌خواهید این ویدیو را دانلود کنید؟", audio: "می‌خواهید این موسیقی را دانلود کنید؟",
           dl: "دانلود", later: "بعداً", never: "برای این سایت نشان نده", sent: "به MyDM ارسال شد ✓",
           sentSite: "در MyDM باز شد؛ کیفیت را آنجا انتخاب کنید ✓",
-          fail: "برنامهٔ MyDM باز نیست.", browser: "دانلود با مرورگر" },
+          fail: "برنامهٔ MyDM باز نیست.", browser: "دانلود با مرورگر",
+          noengine: "موتور ویدیویی MyDM بارگذاری نشده است (در MyDM: تنظیمات ← Video را ببینید)." },
     en: { dir: "ltr", video: "Download this video?", audio: "Download this music?",
           dl: "Download", later: "Not now", never: "Don't ask on this site", sent: "Sent to MyDM ✓",
           sentSite: "Opened in MyDM - choose the quality there ✓",
-          fail: "MyDM is not running.", browser: "Download with browser" },
+          fail: "MyDM is not running.", browser: "Download with browser",
+          noengine: "MyDM's video engine did not load (see Settings > Video in MyDM)." },
   };
   const SKIP = new Set(["m3u8", "mpd", "ts", "m4s"]);
+  const VIDEO_HOSTS = /(^|\.)(youtube\.com|youtu\.be|aparat\.com|vimeo\.com|dailymotion\.com|instagram\.com|tiktok\.com|twitch\.tv)$/;
   const CSS = `
     *{box-sizing:border-box}
     .bar{position:fixed;z-index:2147483647;display:flex;align-items:center;gap:12px;padding:9px 12px;
@@ -60,6 +63,10 @@
     try {
       const r = await chrome.runtime.sendMessage({ type: "supports", url: location.href });
       if (r && r.site) return offer(el, { url: location.href, media, mode: "site", ext: "", size: 0 });
+      // a video site, but MyDM or its video engine is not available: say so instead of staying silent
+      if (r && VIDEO_HOSTS.test(location.hostname) && (!r.app || !r.engine)) {
+        return offer(el, { url: location.href, media, mode: "msg", msg: r.app ? "noengine" : "fail", ext: "", size: 0 });
+      }
     } catch (e) { /* extension reloaded */ }
     for (let i = 0; i < 6; i++) {
       const c = await pick(el);
@@ -119,13 +126,18 @@
     $(".t2").textContent = shown + (c.size ? "  ·  " + fmtSize(c.size) : "");
     const acts = $(".acts");
     const mk = (cls, text, fn) => { const b = document.createElement("button"); if (cls) b.className = cls; b.textContent = text; b.onclick = fn; return b; };
-    acts.append(mk("pri", t.dl, send), mk("", t.later, close));
     const nv = mk("never", t.never, () => {
       cfg.blocked = [...new Set([...cfg.blocked, location.hostname])];
       chrome.storage.sync.set({ blocked: cfg.blocked });
       close();
     });
-    $(".txt").appendChild(nv);
+    if (c.mode === "msg") {
+      $(".t1").className = "t1 err"; $(".t1").textContent = t[c.msg]; $(".t2").textContent = "";
+      acts.append(mk("", t.later, close));
+    } else {
+      acts.append(mk("pri", t.dl, send), mk("", t.later, close));
+      $(".txt").appendChild(nv);
+    }
     $(".x").onclick = close;
     root.appendChild(bar);
     document.documentElement.appendChild(host);
