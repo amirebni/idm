@@ -1,4 +1,4 @@
-// MyDM Downloader 2.2 - background service worker
+// MyDM Downloader 2.3 - background service worker
 const PORTS = [17890, 17891, 17892, 17893, 17894, 17895, 17896, 17897, 17898, 17899];
 const MEDIA_EXT = new Set(["mp4", "m4v", "webm", "mkv", "mov", "avi", "flv", "wmv",
   "mp3", "m4a", "aac", "ogg", "oga", "opus", "wav", "flac"]);
@@ -82,7 +82,7 @@ async function findApp() {
       const j = await r.json();
       if (j.app === "MyDM") {
         await chrome.storage.session.set({ port: p });
-        return { port: p, version: j.version };
+        return { port: p, version: j.version, engine: !!j.engine };
       }
     } catch (e) { /* try the next port */ }
   }
@@ -93,14 +93,15 @@ async function findApp() {
 const supCache = new Map();
 async function supports(url) {
   const c = supCache.get(url);
-  if (c && Date.now() - c.t < 60000) return c.v;
+  if (c && Date.now() - c.t < (c.v.site ? 60000 : 3000)) return c.v;
   const app = await findApp();
-  let v = false;
+  let v = { site: false, engine: !!(app && app.engine), app: !!app };
   if (app) {
     try {
       const r = await fetch(`http://127.0.0.1:${app.port}/supports`, {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url }) });
-      v = !!(await r.json()).site;
+      const j = await r.json();
+      v = { site: !!j.site, engine: !!j.engine, app: true };
     } catch (e) { /* not supported */ }
   }
   supCache.set(url, { v, t: Date.now() });
@@ -133,7 +134,7 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
     return true;
   }
   if (msg.type === "download") { sendToApp(msg).then(reply); return true; }
-  if (msg.type === "supports") { supports(msg.url).then((site) => reply({ site })); return true; }
+  if (msg.type === "supports") { supports(msg.url).then((v) => reply(v)); return true; }
   if (msg.type === "skipped") {
     const id = msg.tabId != null ? msg.tabId : sender.tab && sender.tab.id;
     chrome.storage.session.get("s" + id).then((g) => reply(g["s" + id] || []));
