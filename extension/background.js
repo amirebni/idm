@@ -1,4 +1,4 @@
-// MyDM Downloader 2.3 - background service worker
+// MyDM Downloader 2.4 - background service worker
 const PORTS = [17890, 17891, 17892, 17893, 17894, 17895, 17896, 17897, 17898, 17899];
 const MEDIA_EXT = new Set(["mp4", "m4v", "webm", "mkv", "mov", "avi", "flv", "wmv",
   "mp3", "m4a", "aac", "ogg", "oga", "opus", "wav", "flac"]);
@@ -113,7 +113,7 @@ async function sendToApp(m) {
   if (!app) return { ok: false, error: "not-running" };
   let cookie = "";
   try {
-    const cs = await chrome.cookies.getAll({ url: m.url });
+    const cs = await chrome.cookies.getAll({ url: m.cookieUrl || m.url });
     cookie = cs.map((c) => c.name + "=" + c.value).join("; ");
   } catch (e) { /* no cookies */ }
   try {
@@ -121,7 +121,8 @@ async function sendToApp(m) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ url: m.url, referer: m.referer || "", cookie, ua: navigator.userAgent,
-                             name: m.name || "", action: m.action || "start", kind: m.kind || "file" }),
+                             name: m.name || "", action: m.action || "start", kind: m.kind || "file",
+                             urls: m.urls || [] }),
     });
     return { ok: r.ok, error: r.ok ? "" : "refused" };
   } catch (e) { return { ok: false, error: "failed" }; }
@@ -171,3 +172,65 @@ function drawIcon() {
   } catch (e) { /* default icon is fine */ }
 }
 drawIcon();
+
+// ---------- right-click menu: "Download with MyDM" ----------
+const fa = (chrome.i18n.getUILanguage() || "").startsWith("fa");
+const MENU_TITLE = fa ? "دانلود با MyDM" : "Download with MyDM";
+const MENU_LINKS = fa ? "دانلود لینک‌های انتخاب‌شده با MyDM" : "Download selected links with MyDM";
+
+function makeMenus() {
+  chrome.contextMenus.removeAll(() => {
+    chrome.contextMenus.create({ id: "mydm-link", title: MENU_TITLE, contexts: ["link", "video", "audio"] });
+    chrome.contextMenus.create({ id: "mydm-sel", title: MENU_LINKS, contexts: ["selection"] });
+  });
+}
+chrome.runtime.onInstalled.addListener(makeMenus);
+chrome.runtime.onStartup.addListener(makeMenus);
+
+// runs inside the page: every link (and media source) inside the selection, plus URLs typed as text
+function collectSelection() {
+  const sel = getSelection(), out = [];
+  if (!sel || sel.isCollapsed) return out;
+  const add = (u) => {
+    try {
+      const x = new URL(u, location.href);
+      if (/^https?:$/.test(x.protocol)) out.push(x.href);
+    } catch (e) { /* not a link */ }
+  };
+  for (const a of document.querySelectorAll("a[href]")) {
+    if (sel.containsNode(a, true)) add(a.href);
+  }
+  for (const m of document.querySelectorAll("video[src], audio[src], source[src]")) {
+    if (sel.containsNode(m, true)) add(m.src);
+  }
+  for (const u of sel.toString().match(/https?:\/\/[^\s<>"']+/g) || []) add(u);
+  return out;
+}
+
+function flash(tabId, ok) {
+  chrome.action.setBadgeBackgroundColor({ color: ok ? "#16a34a" : "#dc2626", tabId });
+  chrome.action.setBadgeText({ text: ok ? "\u2713" : "!", tabId });
+  setTimeout(() => chrome.action.setBadgeText({ text: "", tabId }).catch(() => {}), 3500);
+}
+
+async function onMenu(info, tab) {
+  const page = info.frameUrl || info.pageUrl || (tab && tab.url) || "";
+  let r;
+  if (info.menuItemId === "mydm-link") {
+    const url = info.linkUrl || info.srcUrl;
+    if (!url || !/^https?:/.test(url)) return;
+    r = await sendToApp({ url, referer: page, kind: "link", action: "start" });
+  } else if (info.menuItemId === "mydm-sel" && tab) {
+    let urls = [];
+    try {
+      const res = await chrome.scripting.executeScript({
+        target: { tabId: tab.id, frameIds: [info.frameId || 0] }, func: collectSelection });
+      urls = [...new Set(res.flatMap((x) => x.result || []))];
+    } catch (e) { /* page not scriptable */ }
+    if (!urls.length) urls = [...new Set((info.selectionText || "").match(/https?:\/\/[^\s<>"']+/g) || [])];
+    if (!urls.length) { flash(tab.id, false); return; }
+    r = await sendToApp({ url: urls[0], urls, referer: page, kind: "links", action: "start" });
+  } else return;
+  if (tab && tab.id >= 0) flash(tab.id, !!(r && r.ok));
+}
+chrome.contextMenus.onClicked.addListener((i, t) => { onMenu(i, t); });
