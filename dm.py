@@ -2262,3 +2262,593 @@ class App:
             return
         if kind == "link" and is_media(url):      # right-click on a link to a video site
             self.root.deiconify()
+            self.media_flow(url)
+            return
+        old = next((j for j in JOBS if j.url == url and j.status != "Done"), None)
+        if old:
+            self.start([old])
+            self.say("Already in the list")
+            return
+        j = Job(url, CFG["folder"], "stream" if kind == "stream" or is_stream_url(url) else "file")
+        j.referer, j.cookie, j.ua = m["referer"], m["cookie"], m["ua"]
+        if m["name"]:
+            j.name = clean(m["name"])
+        if j.kind == "stream":                         # ask which quality, if the stream offers several
+            def then(u, info):
+                if info["opts"]:
+                    self.root.deiconify()
+                    MediaDialog(self, u, {"title": j.name, "uploader": "HLS stream", "_job": j},
+                                info["opts"])
+                else:
+                    JOBS.append(j)
+                    self.save()
+                    self.say("Added from the browser: " + j.name)
+                    if m["action"] != "queue":
+                        self.start([j])
+            FetchDialog(self, url, lambda: {"opts": hls_choices(j)}, then)
+            return
+        JOBS.append(j)
+        self.save()
+        self.say("Added from the browser: " + j.name)
+        if m["action"] != "queue":
+            self.start([j])
+
+    def drag(self, on):
+        if on != self.lst.drop:
+            self.lst.drop = on
+            self.lst.redraw()
+        return "copy"
+
+    def on_drop(self, e):
+        self.drag(False)
+        urls = []
+        for item in self.root.tk.splitlist(e.data):
+            if os.path.isfile(item):
+                if os.path.splitext(item)[1].lower() in (".txt", ".url", ".lst", ".csv", ".html", ".htm"):
+                    try:
+                        with open(item, encoding="utf-8", errors="ignore") as f:
+                            urls += self.urls_in(f.read(2_000_000))
+                    except OSError:
+                        pass
+            else:
+                urls += self.urls_in(item)
+        if not urls:
+            urls = self.urls_in(e.data)
+        self.offer(urls, start=True)
+        return "copy"
+
+    # ---- list ops ----
+    def match(self, j):
+        q = self.search.value().lower()
+        if q and q not in j.name.lower() and q not in j.url.lower():
+            return False
+        f = self.flt
+        if f == "queue":
+            return j.status in ("Queued", "Waiting")
+        if f == "all":
+            return True
+        if f == "unfinished":
+            return j.status != "Done"
+        if f == "completed":
+            return j.status == "Done"
+        return j.cat == f[2:]
+
+    def set_filter(self, key):
+        self.flt = key
+        self.lst.sel.clear()
+        self.lst.off = 0
+        self.lst.set_jobs([j for j in JOBS if self.match(j)])
+
+    def selected(self):
+        return self.lst.selected()
+
+    def start(self, jobs=None):
+        for j in (jobs if jobs is not None else (self.selected() or JOBS)):
+            if j.status in ("Queued", "Paused") or j.status.startswith("Error"):
+                j.status = "Waiting"
+
+    def pause_jobs(self, jobs):
+        for j in jobs:
+            if j.status != "Done":
+                j.stop.set()
+                if j.status == "Waiting":
+                    j.status = "Paused"
+        self.save()
+
+    def pause(self):
+        self.pause_jobs(self.selected() or JOBS)
+
+    def remove(self, files=False):
+        sel = self.selected()
+        if files and sel and not messagebox.askyesno(
+                "Delete", f"Delete {len(sel)} file(s) from disk too?"):
+            return
+        for j in sel:
+            j.stop.set()
+            if j.path:
+                victim = j.path + ".part" if j.status != "Done" else (j.path if files else None)
+                try:
+                    victim and os.remove(victim)
+                except OSError:
+                    pass
+            if j.id in self.pops:
+                self.pops[j.id].hide()
+            JOBS.remove(j)
+        self.save()
+
+    def clear(self):
+        for j in [j for j in JOBS if j.status == "Done"]:
+            JOBS.remove(j)
+        self.save()
+
+    def redo(self):
+        for j in self.selected():
+            if j.status not in RUNNING:
+                if j.path and j.status != "Done":
+                    try:
+                        os.remove(j.path + ".part")
+                    except OSError:
+                        pass
+                j.segs, j.path, j.speed = [], "", 0.0
+                j.status = "Waiting"
+
+    def openf(self):
+        s = self.selected()
+        if s and s[0].path and os.path.exists(s[0].path):
+            open_path(s[0].path, select=True)
+        else:
+            open_path(s[0].dir if s else CFG["folder"])
+
+    def open_file(self):
+        s = self.selected()
+        if s and s[0].status == "Done" and os.path.exists(s[0].path):
+            open_path(s[0].path)
+
+    def copy_link(self):
+        s = self.selected()
+        if s:
+            t = "\n".join(j.url for j in s)
+            self.root.clipboard_clear()
+            self.root.clipboard_append(t)
+            self.last_clip = t
+
+    def show_pop(self):
+        for j in self.selected()[:3]:
+            self.open_pop(j)
+
+    def open_pop(self, j):
+        if j.id in self.pops:
+            self.pops[j.id].lift()
+            return
+        while len(self.pops) >= 4:
+            old = next((p for p in self.pops.values() if p.job.status not in RUNNING), None)
+            if not old:
+                return
+            old.hide()
+        self.pops[j.id] = Pop(self, j)
+
+    def row_action(self, act, jid):
+        j = next((x for x in JOBS if x.id == jid), None)
+        if not j:
+            return
+        if act == "pause":
+            self.pause_jobs([j])
+        elif act == "start":
+            self.start([j])
+        elif act == "open":
+            open_path(j.path)
+        elif act == "folder":
+            open_path(j.path, select=True) if j.path else open_path(j.folder)
+        elif act == "details":
+            self.open_pop(j)
+
+    def dbl(self, j):
+        if j.status == "Done" and os.path.exists(j.path):
+            open_path(j.path)
+        elif j.status in RUNNING:
+            self.open_pop(j)
+        else:
+            self.start([j])
+
+    def wheel(self, e):
+        try:
+            w = self.root.winfo_containing(e.x_root, e.y_root)
+        except (KeyError, tk.TclError):
+            return
+        if w is self.lst:
+            d = -1 if (getattr(e, "num", 0) == 4 or e.delta > 0) else 1
+            self.lst.scroll_px(d * self.lst.RH // 2)
+
+    # ---- settings ----
+    def video_status(self):
+        y = ytdlp()
+        v = getattr(getattr(y, "version", None), "__version__", "?") if y else "NOT LOADED - " + _YT[2]
+        js = find("qjs.exe" if WIN else "qjs") or shutil.which("deno")
+        return (f"Video engine (yt-dlp): {v}\nffmpeg: {'ok' if ffmpeg_path() else 'missing'}     "
+                f"JS engine: {'ok' if js else 'missing (YouTube may fail)'}")
+
+    def settings(self):
+        w = tk.Toplevel(self.root)
+        w.title("Settings")
+        w.transient(self.root)
+        w.resizable(False, False)
+        w.configure(bg=P["bg"])
+        outer = ttk.Frame(w, padding=(S(16), S(14), S(16), S(14)))
+        outer.pack()
+        nb = ttk.Notebook(outer)
+        nb.pack()
+        vs = {}
+
+        def page(title):
+            f = ttk.Frame(nb, padding=(S(14), S(14), S(14), S(10)))
+            nb.add(f, text=title)
+            return f
+
+        def field(f, r, label, key, width=30):
+            ttk.Label(f, text=label).grid(row=r, column=0, sticky="w", pady=S(4), padx=(0, S(14)))
+            vs[key] = tk.StringVar(value=str(CFG[key]))
+            ttk.Entry(f, textvariable=vs[key], width=width).grid(row=r, column=1, sticky="we")
+
+        def check(f, r, label, key):
+            vs[key] = tk.BooleanVar(value=CFG[key])
+            ttk.Checkbutton(f, text=label, variable=vs[key]).grid(
+                row=r, column=0, columnspan=3, sticky="w", pady=S(3))
+
+        def combo(f, r, label, key, values, value, width=26):
+            ttk.Label(f, text=label).grid(row=r, column=0, sticky="w", pady=S(4), padx=(0, S(14)))
+            vs[key] = tk.StringVar(value=value)
+            ttk.Combobox(f, textvariable=vs[key], state="readonly", width=width, values=values).grid(
+                row=r, column=1, sticky="w")
+
+        g = page("General")
+        field(g, 0, "Download folder", "folder")
+        ttk.Button(g, text="...", width=3, command=lambda: vs["folder"].set(
+            filedialog.askdirectory() or vs["folder"].get())).grid(row=0, column=2, padx=(S(6), 0))
+        check(g, 1, "Sort files into category folders (Video, Music, ...)", "subfolders")
+        check(g, 2, "Show a progress window when a download starts", "popup")
+        check(g, 3, "Play a sound when a download completes", "sound")
+        combo(g, 4, "Theme", "theme", ["System", "Light", "Dark"], CFG["theme"].capitalize(), 12)
+        combo(g, 6, "Download list size", "density", ["Compact", "Comfortable"],
+              CFG.get("density", "compact").capitalize(), 12)
+        vs["startup"] = tk.BooleanVar(value=False)
+        if WIN and getattr(sys, "frozen", False):
+            ttk.Checkbutton(g, text="Start MyDM with Windows (needed for scheduled downloads)",
+                            variable=vs["startup"]).grid(row=5, column=0, columnspan=3, sticky="w")
+
+        c = page("Connection")
+        field(c, 0, "Segments per file (1-32)", "segments", 8)
+        field(c, 1, "Parallel downloads (1-10)", "parallel", 8)
+        field(c, 2, "Speed limit KB/s (0 = unlimited)", "limit_kb", 8)
+        modes = {"system": "System proxy (automatic)", "direct": "No proxy", "manual": "Manual"}
+        combo(c, 3, "Proxy", "mode", list(modes.values()), modes[CFG["proxy_mode"]])
+        ttk.Label(c, style="Sub.TLabel", text="System proxy detected: " + (system_proxy() or "none")
+                  ).grid(row=4, column=1, sticky="w")
+        field(c, 5, "Manual proxy", "proxy")
+        ttk.Label(c, style="Sub.TLabel", text="http://host:port   or   socks5://host:port").grid(
+            row=6, column=1, sticky="w")
+
+        b = page("Browser")
+        ttk.Label(b, text="Clipboard", font=(FONT, 10, "bold")).grid(row=0, column=0, sticky="w")
+        check(b, 1, "Watch the clipboard for download links", "watch")
+        clips = {"ask": "Ask me (show a window)", "add": "Add to the list automatically"}
+        combo(b, 2, "When a link is found", "clip_mode", list(clips.values()), clips[CFG["clip_mode"]], 28)
+        check(b, 3, "Also start the download when links are added automatically", "autostart")
+        ttk.Label(b, text="Browser extension", font=(FONT, 10, "bold")).grid(
+            row=4, column=0, sticky="w", pady=(S(12), 0))
+        check(b, 5, "Accept downloads sent from the browser extension", "bridge")
+        ttk.Label(b, style="Sub.TLabel", text=(
+            f"MyDM {VERSION}   |   " + (f"listening on 127.0.0.1:{self.port}" if self.port
+                                        else "could not open a local port"))).grid(
+            row=6, column=0, columnspan=3, sticky="w")
+        br = ttk.Frame(b)
+        br.grid(row=7, column=0, columnspan=3, sticky="w", pady=(S(8), 0))
+        ttk.Button(br, text="Open extension folder", command=lambda: open_path(ext_dir())).pack(side="left")
+        ttk.Button(br, text="Open Chrome extensions page", command=open_chrome_ext).pack(
+            side="left", padx=6)
+
+        v = page("Video")
+        combo(v, 0, "Default quality", "ytq", ["Best", "1080p", "720p", "480p", "360p", "Audio (MP3)"],
+              CFG["ytq"], 14)
+        combo(v, 1, "Browser cookies", "cookies", ["none", "firefox", "edge", "chrome", "brave"],
+              CFG["cookies"] or "none", 14)
+        ttk.Label(v, style="Sub.TLabel", text="Needed when a site says \"sign in to confirm you're not a bot\".").grid(
+            row=2, column=1, sticky="w")
+        check(v, 3, "Offer a video download for video links copied to the clipboard", "watch_media")
+        ttk.Label(v, style="Sub.TLabel", justify="left", wraplength=S(520), text=self.video_status()).grid(
+            row=4, column=0, columnspan=3, sticky="w", pady=(S(10), S(4)))
+        ub = ttk.Frame(v)
+        ub.grid(row=5, column=0, columnspan=3, sticky="w")
+        upd_btn = ttk.Button(ub, text="Update video engine")
+        upd_btn.pack(side="left")
+        upd_msg = ttk.Label(ub, text="", style="Sub.TLabel", wraplength=S(300), justify="left")
+        upd_msg.pack(side="left", padx=10)
+
+        def update():
+            upd_btn.config(state="disabled")
+            upd_msg.config(text="Downloading...")
+            res = {}
+            threading.Thread(target=lambda: res.setdefault("r", update_engine()), daemon=True).start()
+
+            def poll():
+                if "r" in res:
+                    upd_msg.config(text=res["r"][1])
+                    upd_btn.config(state="normal")
+                elif w.winfo_exists():
+                    w.after(300, poll)
+            poll()
+        upd_btn.config(command=update)
+
+        def ok():
+            try:
+                seg = min(32, max(1, int(vs["segments"].get())))
+                par = min(10, max(1, int(vs["parallel"].get())))
+                lim = max(0, int(vs["limit_kb"].get()))
+            except ValueError:
+                messagebox.showerror("Settings", "Numeric fields must be numbers.")
+                return
+            CFG.update(segments=seg, parallel=par, limit_kb=lim,
+                       folder=vs["folder"].get().strip() or CFG["folder"],
+                       proxy=vs["proxy"].get().strip(), theme=vs["theme"].get().lower(), density=vs["density"].get().lower(),
+                       proxy_mode=next(k for k, x in modes.items() if x == vs["mode"].get()),
+                       subfolders=vs["subfolders"].get(), popup=vs["popup"].get(),
+                       sound=vs["sound"].get(), watch=vs["watch"].get(),
+                       autostart=vs["autostart"].get(), bridge=vs["bridge"].get(),
+                       ytq=vs["ytq"].get(),
+                       cookies="" if vs["cookies"].get() == "none" else vs["cookies"].get(),
+                       watch_media=vs["watch_media"].get(),
+                       clip_mode=next(k for k, x in clips.items() if x == vs["clip_mode"].get()))
+            if WIN and getattr(sys, "frozen", False):
+                set_startup(vs["startup"].get())
+            self.save()
+            self.retheme()
+            self.lst.redraw()
+            w.destroy()
+
+        row = ttk.Frame(outer)
+        row.pack(fill="x", pady=(S(12), 0))
+        ttk.Button(row, text="Save", style="Accent.TButton", command=ok).pack(side="right")
+        ttk.Button(row, text="Cancel", command=w.destroy).pack(side="right", padx=8)
+        self.place_dialog(w)
+
+    def place_dialog(self, w):
+        w.update_idletasks()
+        r = self.root
+        w.geometry(f"+{r.winfo_rootx() + max(0, (r.winfo_width() - w.winfo_reqwidth()) // 2)}"
+                   f"+{r.winfo_rooty() + S(50)}")
+        titlebar(w, P["dark"])
+        w.grab_set()
+
+    # ---- scheduler ----
+    def scheduler(self):
+        s = CFG["sched"]
+        w = tk.Toplevel(self.root)
+        w.title("Scheduler")
+        w.transient(self.root)
+        w.resizable(False, False)
+        w.configure(bg=P["bg"])
+        f = ttk.Frame(w, padding=S(18))
+        f.pack()
+        ttk.Label(f, text="Scheduler", font=(FONT, 13, "bold")).grid(row=0, column=0, columnspan=4,
+                                                                    sticky="w", pady=(0, S(10)))
+        v = {k: tk.BooleanVar(value=s[k]) for k in ("start_on", "stop_on", "daily", "on_finish")}
+        tv = {}
+
+        def time_row(r, label, key, onkey):
+            ttk.Checkbutton(f, text=label, variable=v[onkey]).grid(row=r, column=0, sticky="w", pady=S(5))
+            hh, mm = s[key].split(":")
+            h = tk.StringVar(value=hh)
+            m = tk.StringVar(value=mm)
+            ttk.Spinbox(f, from_=0, to=23, width=3, wrap=True, format="%02.0f",
+                        textvariable=h).grid(row=r, column=1, padx=(S(12), 0))
+            ttk.Label(f, text=":").grid(row=r, column=2)
+            ttk.Spinbox(f, from_=0, to=59, width=3, wrap=True, format="%02.0f",
+                        textvariable=m).grid(row=r, column=3)
+            tv[key] = (h, m)
+
+        time_row(1, "Start downloads at", "start", "start_on")
+        time_row(2, "Stop downloads at", "stop", "stop_on")
+        ttk.Checkbutton(f, text="Repeat every day", variable=v["daily"]).grid(
+            row=3, column=0, columnspan=4, sticky="w", pady=S(5))
+        ttk.Label(f, text="When the stop time arrives, or all\ndownloads finish, do this:").grid(
+            row=4, column=0, columnspan=4, sticky="w", pady=(S(10), S(4)))
+        act = tk.StringVar(value=s["action"])
+        ttk.Combobox(f, textvariable=act, values=ACTIONS, state="readonly", width=30).grid(
+            row=5, column=0, columnspan=4, sticky="w")
+        ttk.Checkbutton(f, text="Also do it when all downloads finish", variable=v["on_finish"]
+                        ).grid(row=6, column=0, columnspan=4, sticky="w", pady=S(8))
+        ttk.Label(f, style="Sub.TLabel", wraplength=S(360), justify="left",
+                  text="MyDM must be running and the PC awake at the start time. Power actions "
+                       "show a 30 second countdown you can cancel.").grid(
+            row=7, column=0, columnspan=4, sticky="w")
+
+        def ok():
+            for k in ("start", "stop"):
+                h, m = tv[k]
+                try:
+                    s[k] = f"{min(23, max(0, int(h.get()))):02d}:{min(59, max(0, int(m.get()))):02d}"
+                except ValueError:
+                    pass
+            for k in v:
+                s[k] = v[k].get()
+            s["action"] = act.get()
+            self.fired.clear()
+            self.save()
+            w.destroy()
+
+        row = ttk.Frame(f)
+        row.grid(row=8, column=0, columnspan=4, sticky="e", pady=(S(16), 0))
+        ttk.Button(row, text="Cancel", command=w.destroy).pack(side="left", padx=6)
+        ttk.Button(row, text="Save", style="Accent.TButton", command=ok).pack(side="left")
+        self.place_dialog(w)
+
+    def sched_summary(self):
+        s, parts = CFG["sched"], []
+        if s["start_on"]:
+            parts.append("start " + s["start"])
+        if s["stop_on"]:
+            parts.append("stop " + s["stop"])
+        if s["action"] != "Do nothing" and (s["stop_on"] or s["on_finish"]):
+            parts.append("then " + s["action"].lower())
+        return ("\u23f0 " + ", ".join(parts)) if parts else ""
+
+    def run_action(self, action, why):
+        if action == "Do nothing":
+            return
+        self.save()
+        if action == "Exit MyDM":
+            self.close()
+        elif action == "Lock screen":
+            cmd = power_cmd(action)
+            cmd and subprocess.Popen(cmd, creationflags=0x08000000 if WIN else 0)
+        else:
+            Countdown(self, action, why)
+
+    def sched_check(self):
+        s = CFG["sched"]
+        n = datetime.now()
+        hm, today = n.strftime("%H:%M"), n.strftime("%Y%m%d")
+        if s["start_on"] and hm == s["start"] and self.fired.get("start") != today:
+            self.fired["start"] = today
+            jobs = [j for j in JOBS if j.status != "Done"]
+            self.start(jobs)
+            self.say(f"Scheduler: started {len(jobs)} download(s)")
+            if not s["daily"]:
+                s["start_on"] = False
+                self.save()
+        if s["stop_on"] and hm == s["stop"] and self.fired.get("stop") != today:
+            self.fired["stop"] = today
+            self.pause_jobs([j for j in JOBS if j.status in RUNNING])
+            self.say("Scheduler: stopped downloads")
+            self.pending = (s["action"], "Scheduled stop time reached")
+            if not s["daily"]:
+                s["stop_on"] = False
+                self.save()
+
+    # ---- main loop ----
+    def tick(self):
+        if self.closing:
+            return
+        now = time.monotonic()
+        self.ticks += 1
+        self.sched_check()
+        while True:
+            try:
+                self.from_browser(self.inbox.get_nowait())
+            except queue.Empty:
+                break
+        active = [j for j in JOBS if j.status in ("Connecting", "Downloading")]
+        for j in JOBS:
+            if j.status == "Waiting" and len(active) < CFG["parallel"]:
+                j.status = "Connecting"
+                j.stop.clear()
+                j.speed, j.hist, j.last = 0.0, [], (now, j.done)
+                self.session.add(j.id)
+                threading.Thread(target=j.run, daemon=True).start()
+                active.append(j)
+                shown = sum(1 for p in self.pops.values() if p.job.status in RUNNING)
+                if CFG["popup"] and shown < 3:
+                    self.open_pop(j)
+
+        if CFG["watch"]:
+            try:
+                t = self.root.clipboard_get()
+            except tk.TclError:
+                t = ""
+            if t and t != self.last_clip:
+                self.last_clip = t
+                urls = self.urls_in(t)
+                known = [u for u in urls if os.path.splitext(urlparse(u).path)[1].lstrip(".").lower() in EXTS]
+                auto = CFG["clip_mode"] == "add"
+                if len(urls) == 1 and known:
+                    if auto:
+                        self.add_many(known, auto=CFG["autostart"])
+                    elif not any(j.url == known[0] for j in JOBS):
+                        BatchDialog(self, known, False)          # ask: add it or not?
+                elif len(urls) == 1 and CFG["watch_media"] and is_media(urls[0]):
+                    self.media_flow(urls[0])                      # opens the quality window
+                elif len(urls) > 1:
+                    if auto:
+                        self.add_many(urls, auto=CFG["autostart"])
+                    else:
+                        BatchDialog(self, urls, False)
+
+        if self.ticks % 10 == 0 and CFG["theme"] == "system" and system_dark() != P["dark"]:
+            self.retheme()
+
+        total_speed = 0.0
+        counts = {k: 0 for k in ["all", "unfinished", "completed", "queue"] + ["c:" + c for c in CAT_LIST]}
+        for j in JOBS:
+            d = j.done
+            t0, d0 = j.last
+            if j.status == "Downloading":
+                if now - t0 >= 1:
+                    j.speed, j.last = max(0.0, (d - d0) / (now - t0)), (now, d)
+                    j.hist = (j.hist + [j.speed])[-120:]
+            else:
+                j.speed = 0.0
+            total_speed += j.speed
+            counts["all"] += 1
+            counts["completed" if j.status == "Done" else "unfinished"] += 1
+            counts["c:" + j.cat] += 1
+            counts["queue"] += j.status in ("Queued", "Waiting")
+            if j.status != j.prev:
+                if j.status == "Done" and CFG["sound"]:
+                    try:
+                        import winsound
+                        winsound.MessageBeep()
+                    except Exception:
+                        self.root.bell()
+                j.prev = j.status
+        self.side.set_counts(counts)
+        self.lst.set_jobs([j for j in JOBS if self.match(j)])
+        for jid, p in list(self.pops.items()):
+            try:
+                p.refresh()
+            except tk.TclError:
+                self.pops.pop(jid, None)
+
+        busy = any(j.status in RUNNING for j in JOBS)
+        if not busy and self.session:
+            mine = [j for j in JOBS if j.id in self.session]
+            self.session.clear()
+            s = CFG["sched"]
+            if mine and all(j.status == "Done" for j in mine) and s["on_finish"] \
+                    and s["action"] != "Do nothing":
+                self.pending = (s["action"], "All downloads finished")
+                if not (s["start_on"] or s["stop_on"]):
+                    s["on_finish"] = False
+                    self.save()
+        if self.pending and not busy:
+            act, why = self.pending
+            self.pending = None
+            self.run_action(act, why)
+
+        info = f"{len(JOBS)} items   {len(active)} active"
+        sel = self.selected()
+        if len(sel) == 1 and sel[0].status.startswith("Error"):
+            info += "   -   " + sel[0].status
+        elif time.time() < self.note_until:
+            info += "   -   " + self.note
+        self.status.set(info)
+        self.speed_txt.set(f"\u2193 {human(total_speed)}/s")
+        self.sched_txt.set(self.sched_summary())
+        self.update_tb()
+        if self.ticks % 10 == 0:
+            self.save()
+        self.root.after(500, self.tick)
+
+
+if __name__ == "__main__":
+    try:
+        import ctypes
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except Exception:
+        pass
+    try:
+        root = BaseTk()
+    except Exception:          # drag-and-drop library failed to load
+        TkinterDnD = None
+        root = tk.Tk()
+    SC = max(1.0, root.winfo_fpixels("1i") / 96)
+    App(root)
+    root.mainloop()
