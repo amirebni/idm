@@ -27,9 +27,9 @@ jobs:
       - run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss'
       - uses: actions/upload-artifact@v4
         with:
-          name: MyDM-Setup-v2.3
-          path: Output/MyDM_Setup_v2.3.exe
+          name: MyDM-Setup-v2.4
+          path: Output/MyDM_Setup_v2.4.exe
       - uses: actions/upload-artifact@v4
         with:
-          name: MyDM-Extension-v2.3
+          name: MyDM-Extension-v2.4
           path: extension
