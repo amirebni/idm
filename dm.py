@@ -1,6 +1,7 @@
 import os, re, sys, json, time, queue, shutil, mimetypes, threading, subprocess
 import tkinter as tk
 import tkinter.font as tkfont
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -53,7 +54,7 @@ RUNNING = ("Waiting", "Connecting", "Downloading")
 ACTIONS = ["Do nothing", "Exit MyDM", "Lock screen", "Log off", "Sleep", "Hibernate",
            "Restart", "Shut down", "Shut down (force close apps)"]
 WIN = sys.platform.startswith("win")
-VERSION = "2.3"
+VERSION = "2.4"
 EXT_ID = "njeclpgnkpobfkiefclomnolojaacned"          # fixed ID of the bundled browser extension
 PORTS = range(17890, 17900)
 SCHED = {"start_on": False, "start": "02:00", "stop_on": False, "stop": "07:00",
@@ -62,7 +63,7 @@ CFG = {"folder": str(Path.home() / "Downloads"), "segments": 8, "parallel": 3,
        "limit_kb": 0, "proxy_mode": "system", "proxy": "", "watch": True,
        "autostart": False, "subfolders": True, "popup": True, "sound": False,
        "theme": "system", "geom": "", "sched": dict(SCHED), "bridge": True,
-       "ytq": "1080p", "cookies": "", "watch_media": False}
+       "ytq": "1080p", "cookies": "", "watch_media": False, "clip_mode": "ask"}
 JOBS = []
 FONT, SC = "TkDefaultFont", 1.0
 
@@ -293,7 +294,15 @@ def default_choice():
 def quality_options(info, ff):
     fm = info.get("formats") or []
     has = lambda f, k: f.get(k) not in (None, "none")
-    size = lambda f: (f.get("filesize") or f.get("filesize_approx") or 0) if f else 0
+    dur0 = info.get("duration") or 0
+
+    def size(f):
+        if not f:
+            return 0
+        n = f.get("filesize") or f.get("filesize_approx") or 0
+        if not n and dur0 and (f.get("tbr") or f.get("vbr") or f.get("abr")):
+            n = int((f.get("tbr") or (f.get("vbr") or 0) + (f.get("abr") or 0)) * 125 * dur0)
+        return int(n)
     vids = [f for f in fm if has(f, "vcodec") and f.get("height")]
     auds = [f for f in fm if has(f, "acodec") and not has(f, "vcodec")]
     aud = max(auds, key=lambda f: f.get("abr") or 0, default=None)
@@ -311,7 +320,17 @@ def quality_options(info, ff):
                  "AV1" if "av01" in vc else (b.get("ext") or "").upper())
         sz = size(b) + (0 if has(b, "acodec") else size(aud))
         opts.append(dict(label=f"{h}p", detail=codec, size=sz, fmt=vsel(h, ff),
-                         audio=False, mp3=False, h=h))
+                         audio=False, mp3=False, h=h, w=b.get("width") or 0,
+                         bitrate=(b.get("tbr") or 0) * 125))
+    # sizes that are all identical are a sign of bad data from the site: estimate again
+    if len(opts) > 1 and len({o["size"] for o in opts}) == 1:
+        for o in opts:
+            o["size"] = int(o["bitrate"] * dur0) if o["bitrate"] and dur0 else 0
+        if len({o["size"] for o in opts}) == 1:
+            base = opts[0]["size"] or 0
+            top = max(o["h"] * (o["w"] or o["h"] * 16 // 9) for o in opts) or 1
+            for o in opts:
+                o["size"] = int(base * (o["h"] * (o["w"] or o["h"] * 16 // 9)) / top) if base else 0
     dur = info.get("duration") or 0
     if ff:
         opts.append(dict(label="Audio only", detail="MP3  192 kbps", size=int(dur * 24000),
@@ -338,19 +357,44 @@ def hls_choices(job):
         text = http_get(job.url, headers=job.hdrs(), timeout=20).text
         if "#EXT-X-STREAM-INF" not in text:
             return []
-        dur = job.stream_info()
+        lines = text.splitlines()
         opts = []
-        for i, m in enumerate(re.finditer(r"#EXT-X-STREAM-INF:([^\n]*)", text)):
-            a = m.group(1)
-            bw = int((re.search(r"BANDWIDTH=(\d+)", a) or [0, 0])[1])
+        for ln, line in enumerate(lines):
+            if not line.startswith("#EXT-X-STREAM-INF:"):
+                continue
+            a = line.split(":", 1)[1]
+            link = next((x.strip() for x in lines[ln + 1:] if x.strip() and not x.startswith("#")), "")
+            bw = int((re.search(r"(?<![A-Z-])BANDWIDTH=(\d+)", a) or [0, 0])[1])
+            avg = int((re.search(r"AVERAGE-BANDWIDTH=(\d+)", a) or [0, 0])[1])
             r = re.search(r"RESOLUTION=(\d+)x(\d+)", a)
             hh = int(r.group(2)) if r else 0
-            opts.append(dict(label=f"{hh}p" if hh else f"{bw // 1000} kbps",
-                             detail=(f"{r.group(1)}x{hh}   " if r else "") + f"{bw / 1e6:.1f} Mbps",
-                             size=int(bw * dur / 8), fmt=f"p:{i}", audio=False, mp3=False,
-                             h=hh or bw // 1000, bw=bw))
+            ww = int(r.group(1)) if r else 0
+            opts.append(dict(label=f"{hh}p" if hh else f"{(avg or bw) // 1000} kbps",
+                             detail=(f"{ww}x{hh}   " if r else "") + f"{(avg or bw) / 1e6:.1f} Mbps",
+                             size=0, fmt=f"p:{len(opts)}", audio=False, mp3=False,
+                             h=hh or (avg or bw) // 1000, bw=bw, avg=avg, w=ww, link=link))
+        if len(opts) < 2:
+            return []
+
+        def dur_of(o):                  # real length of this variant's own playlist
+            try:
+                t = http_get(urljoin(job.url, o["link"]), headers=job.hdrs(), timeout=15).text
+                return sum(float(x) for x in re.findall(r"#EXTINF:([\d.]+)", t))
+            except Exception:
+                return 0
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            durs = list(ex.map(dur_of, opts))
+        fallback = max(durs) if any(durs) else job.stream_info()
+        for o, d in zip(opts, durs):
+            o["size"] = int((o["avg"] or o["bw"]) * (d or fallback) / 8)
+        if len({o["avg"] or o["bw"] for o in opts}) == 1:   # site reports one bitrate for everything
+            top = max(o["h"] * (o["w"] or 1) for o in opts) or 1
+            for o in opts:
+                o["size"] = int(o["size"] * (o["h"] * (o["w"] or 1)) / top)
+        for o in opts:
+            o.pop("link", None)
         opts.sort(key=lambda o: (o["h"], o["bw"]), reverse=True)
-        return opts if len(opts) > 1 else []
+        return opts
     except Exception:
         return []
 
@@ -430,6 +474,11 @@ def start_bridge(inbox):
                 d = json.loads(self.rfile.read(n))
                 m = {k: re.sub(r"[\r\n]+", " ", str(d.get(k) or ""))[:4000]
                      for k in ("url", "referer", "cookie", "ua", "name", "action", "kind")}
+                ls = d.get("urls") if isinstance(d.get("urls"), list) else []
+                m["urls"] = [re.sub(r"\s+", "", str(x))[:2000] for x in ls[:300]
+                             if str(x).startswith(("http://", "https://"))]
+                if not m["url"] and m["urls"]:
+                    m["url"] = m["urls"][0]
                 if not m["url"].startswith(("http://", "https://")):
                     return self.reply(400)
             except Exception:
@@ -1372,10 +1421,10 @@ class Pop(tk.Toplevel):
 
 
 class BatchDialog(tk.Toplevel):
-    def __init__(self, app, urls, start):
+    def __init__(self, app, urls, start, ctx=None):
         super().__init__(app.root)
-        self.app, self.urls = app, urls
-        self.title(f"{len(urls)} links found")
+        self.app, self.urls, self.ctx = app, urls, ctx
+        self.title("Link found" if len(urls) == 1 else f"{len(urls)} links found")
         self.configure(bg=P["bg"])
         self.transient(app.root)
         f = ttk.Frame(self, padding=S(16))
@@ -1446,7 +1495,7 @@ class BatchDialog(tk.Toplevel):
         chosen = [u for i, u in enumerate(self.urls) if self.on[str(i)]]
         self.destroy()
         if chosen:
-            self.app.add_many(chosen, auto=start)
+            self.app.add_many(chosen, auto=start, ctx=self.ctx)
 
 
 class FetchDialog(tk.Toplevel):
@@ -1752,7 +1801,7 @@ class App:
     def urls_in(self, text):
         return list(dict.fromkeys(re.findall(r'https?://[^\s<>"\']+', text)))
 
-    def add_many(self, urls, auto=False):
+    def add_many(self, urls, auto=False, ctx=None):
         new = []
         for u in urls:
             if not any(j.url == u for j in JOBS):
@@ -1760,6 +1809,8 @@ class App:
                 j = Job(u, CFG["folder"], kind)
                 if kind == "media":
                     j.fmt, j.audio, j.mp3 = default_choice()
+                elif ctx:
+                    j.referer, j.cookie, j.ua = ctx.get("referer", ""), ctx.get("cookie", ""), ctx.get("ua", "")
                 JOBS.append(j)
                 new.append(j)
         self.say(f"{len(new)} new link(s) added" if urls else "No valid link found")
@@ -1846,6 +1897,22 @@ class App:
     def from_browser(self, m):
         url, kind = m["url"], m.get("kind") or "file"
         if kind == "site":                       # a page the video engine understands (YouTube, Aparat...)
+            self.root.deiconify()
+            self.media_flow(url)
+            return
+        if kind == "links":                      # right-click on a selection: every link inside it
+            self.root.deiconify()
+            self.root.lift()
+            urls = list(dict.fromkeys(m.get("urls") or [url]))
+            ctx = {"referer": m["referer"], "cookie": m["cookie"], "ua": m["ua"]}
+            if len(urls) == 1 and not is_media(urls[0]):
+                self.add_many(urls, auto=True, ctx=ctx)
+            elif len(urls) == 1:
+                self.media_flow(urls[0])
+            else:
+                BatchDialog(self, urls, True, ctx)
+            return
+        if kind == "link" and is_media(url):      # right-click on a link to a video site
             self.root.deiconify()
             self.media_flow(url)
             return
@@ -2108,16 +2175,18 @@ class App:
         b = page("Browser")
         ttk.Label(b, text="Clipboard", font=(FONT, 10, "bold")).grid(row=0, column=0, sticky="w")
         check(b, 1, "Watch the clipboard for download links", "watch")
-        check(b, 2, "Start automatically when links are caught", "autostart")
+        clips = {"ask": "Ask me (show a window)", "add": "Add to the list automatically"}
+        combo(b, 2, "When a link is found", "clip_mode", list(clips.values()), clips[CFG["clip_mode"]], 28)
+        check(b, 3, "Also start the download when links are added automatically", "autostart")
         ttk.Label(b, text="Browser extension", font=(FONT, 10, "bold")).grid(
-            row=3, column=0, sticky="w", pady=(S(12), 0))
-        check(b, 4, "Accept downloads sent from the browser extension", "bridge")
+            row=4, column=0, sticky="w", pady=(S(12), 0))
+        check(b, 5, "Accept downloads sent from the browser extension", "bridge")
         ttk.Label(b, style="Sub.TLabel", text=(
             f"MyDM {VERSION}   |   " + (f"listening on 127.0.0.1:{self.port}" if self.port
                                         else "could not open a local port"))).grid(
-            row=5, column=0, columnspan=3, sticky="w")
+            row=6, column=0, columnspan=3, sticky="w")
         br = ttk.Frame(b)
-        br.grid(row=6, column=0, columnspan=3, sticky="w", pady=(S(8), 0))
+        br.grid(row=7, column=0, columnspan=3, sticky="w", pady=(S(8), 0))
         ttk.Button(br, text="Open extension folder", command=lambda: open_path(ext_dir())).pack(side="left")
         ttk.Button(br, text="Open Chrome extensions page", command=open_chrome_ext).pack(
             side="left", padx=6)
@@ -2171,7 +2240,8 @@ class App:
                        autostart=vs["autostart"].get(), bridge=vs["bridge"].get(),
                        ytq=vs["ytq"].get(),
                        cookies="" if vs["cookies"].get() == "none" else vs["cookies"].get(),
-                       watch_media=vs["watch_media"].get())
+                       watch_media=vs["watch_media"].get(),
+                       clip_mode=next(k for k, x in clips.items() if x == vs["clip_mode"].get()))
             if WIN and getattr(sys, "frozen", False):
                 set_startup(vs["startup"].get())
             self.save()
@@ -2332,13 +2402,17 @@ class App:
                 self.last_clip = t
                 urls = self.urls_in(t)
                 known = [u for u in urls if os.path.splitext(urlparse(u).path)[1].lstrip(".").lower() in EXTS]
+                auto = CFG["clip_mode"] == "add"
                 if len(urls) == 1 and known:
-                    self.add_many(known, auto=CFG["autostart"])
+                    if auto:
+                        self.add_many(known, auto=CFG["autostart"])
+                    elif not any(j.url == known[0] for j in JOBS):
+                        BatchDialog(self, known, False)          # ask: add it or not?
                 elif len(urls) == 1 and CFG["watch_media"] and is_media(urls[0]):
-                    self.media_flow(urls[0])
+                    self.media_flow(urls[0])                      # opens the quality window
                 elif len(urls) > 1:
-                    if CFG["autostart"]:
-                        self.add_many(urls, auto=True)
+                    if auto:
+                        self.add_many(urls, auto=CFG["autostart"])
                     else:
                         BatchDialog(self, urls, False)
 
