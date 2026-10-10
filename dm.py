@@ -1,4 +1,4 @@
-import os, re, sys, json, time, queue, shutil, mimetypes, threading, subprocess
+import os, re, sys, json, math, time, queue, shutil, mimetypes, threading, subprocess
 import tkinter as tk
 import tkinter.font as tkfont
 from concurrent.futures import ThreadPoolExecutor
@@ -54,7 +54,7 @@ RUNNING = ("Waiting", "Connecting", "Downloading")
 ACTIONS = ["Do nothing", "Exit MyDM", "Lock screen", "Log off", "Sleep", "Hibernate",
            "Restart", "Shut down", "Shut down (force close apps)"]
 WIN = sys.platform.startswith("win")
-VERSION = "2.5"
+VERSION = "2.6"
 EXT_ID = "njeclpgnkpobfkiefclomnolojaacned"          # fixed ID of the bundled browser extension
 PORTS = range(17890, 17900)
 SCHED = {"start_on": False, "start": "02:00", "stop_on": False, "stop": "07:00",
@@ -68,12 +68,12 @@ JOBS = []
 FONT, SC = "TkDefaultFont", 1.0
 
 # Semantic desktop design tokens, shared by all windows.
-LIGHT = dict(dark=False, bg="#f6f8fa", panel="#ffffff", fg="#202b33", sub="#7b8793",
-             accent="#078b78", accent2="#067565", border="#e7ebef", sel="#e5f5f0",
-             hdr="#f0f3f6", hover="#f8fafb", ok="#078b78", err="#df5661", bar="#edf0f3")
-DARK = dict(dark=True, bg="#15191d", panel="#1d2328", fg="#e8edf0", sub="#93a0aa",
-            accent="#35bfa4", accent2="#26a98f", border="#30383f", sel="#203b36",
-            hdr="#252c32", hover="#242c31", ok="#35bfa4", err="#f47b85", bar="#30383f")
+LIGHT = dict(dark=False, bg="#f4f5f7", panel="#ffffff", fg="#1b1d22", sub="#737782",
+             accent="#2f6df0", accent2="#2559cc", border="#e2e4e9", sel="#e8f0ff",
+             hdr="#eceef2", hover="#eef1f7", ok="#1f9e66", err="#d93a45", bar="#dfe2e8", warn="#d98a1b")
+DARK = dict(dark=True, bg="#0b0b0c", panel="#141416", fg="#e9eaee", sub="#8b8d96",
+            accent="#4c8dff", accent2="#3a78e8", border="#232327", sel="#18212f",
+            hdr="#0f0f11", hover="#121217", ok="#3ecf8e", err="#ff5a5f", bar="#26262b", warn="#f2a33a")
 P = dict(LIGHT)
 
 
@@ -677,12 +677,13 @@ LIM = Limiter()
 
 class Job:
     KEYS = ("url", "folder", "name", "path", "total", "ranged", "segs", "status", "referer",
-            "kind", "fmt", "audio", "mp3")
+            "kind", "fmt", "audio", "mp3", "added")
 
     def __init__(self, url, folder, kind="file"):
         self.url, self.folder = url, folder
         self.referer, self.cookie, self.ua = "", "", ""
         self.kind, self.fmt, self.audio, self.mp3, self.note = kind, "", False, False, ""
+        self.added = time.time()
         self.name = (urlparse(url).netloc.replace("www.", "") + " video" if kind != "file" else
                      clean(unquote(os.path.basename(urlparse(url).path))))
         self.path, self.total, self.ranged, self.segs = "", 0, False, []
@@ -987,50 +988,258 @@ class Job:
 
 
 # ================================================================== widgets
-class Hint(ttk.Entry):
-    def __init__(self, parent, hint):
-        super().__init__(parent)
-        self.hint, self.empty = hint, False
-        self.bind("<FocusIn>", self._in)
-        self.bind("<FocusOut>", self._out)
-        self._out()
+def glyph(c, kind, cx, cy, s, col, w=None):
+    """Small line icons drawn straight on a canvas. (cx, cy) = centre, s = size in pixels."""
+    h = s / 2
+    w = w or max(1, round(s / 11))
+    L = lambda *p: c.create_line(*p, fill=col, width=w, capstyle="round", joinstyle="round")
+    R = lambda *p: c.create_rectangle(*p, outline=col, width=w)
+    O = lambda *p: c.create_oval(*p, outline=col, width=w)
+    PG = lambda *p: c.create_polygon(*p, outline=col, fill="", width=w, joinstyle="round")
+    o = lambda r: (cx - r * h, cy - r * h, cx + r * h, cy + r * h)
+    if kind == "plus":
+        L(cx - .6 * h, cy, cx + .6 * h, cy)
+        L(cx, cy - .6 * h, cx, cy + .6 * h)
+    elif kind == "play":
+        PG(cx - .45 * h, cy - .65 * h, cx + .7 * h, cy, cx - .45 * h, cy + .65 * h)
+    elif kind == "stop":
+        R(cx - .55 * h, cy - .55 * h, cx + .55 * h, cy + .55 * h)
+    elif kind == "stopall":
+        O(*o(.8))
+        L(cx - .3 * h, cy - .3 * h, cx + .3 * h, cy + .3 * h)
+        L(cx - .3 * h, cy + .3 * h, cx + .3 * h, cy - .3 * h)
+    elif kind == "trash":
+        L(cx - .75 * h, cy - .45 * h, cx + .75 * h, cy - .45 * h)
+        L(cx - .25 * h, cy - .45 * h, cx - .25 * h, cy - .75 * h, cx + .25 * h, cy - .75 * h, cx + .25 * h, cy - .45 * h)
+        PG(cx - .55 * h, cy - .45 * h, cx - .42 * h, cy + .8 * h, cx + .42 * h, cy + .8 * h, cx + .55 * h, cy - .45 * h)
+    elif kind == "eraser":
+        PG(cx - .8 * h, cy + .05 * h, cx + .05 * h, cy - .8 * h, cx + .8 * h, cy - .05 * h, cx - .05 * h, cy + .8 * h)
+        L(cx - .35 * h, cy - .4 * h, cx + .4 * h, cy + .35 * h)
+    elif kind == "gear":
+        O(*o(.3))
+        O(*o(.62))
+        for i in range(8):
+            a = i * math.pi / 4
+            L(cx + .62 * h * math.cos(a), cy + .62 * h * math.sin(a),
+              cx + .92 * h * math.cos(a), cy + .92 * h * math.sin(a))
+    elif kind == "clock":
+        O(*o(.85))
+        L(cx, cy - .5 * h, cx, cy, cx + .4 * h, cy + .25 * h)
+    elif kind in ("startq", "stopq"):
+        for dy in (-.6, -.05, .5):
+            L(cx - .85 * h, cy + dy * h, cx + .1 * h, cy + dy * h)
+        if kind == "startq":
+            PG(cx + .35 * h, cy - .35 * h, cx + .9 * h, cy + .05 * h, cx + .35 * h, cy + .45 * h)
+        else:
+            L(cx + .4 * h, cy - .3 * h, cx + .85 * h, cy + .2 * h)
+            L(cx + .4 * h, cy + .2 * h, cx + .85 * h, cy - .3 * h)
+    elif kind == "layers":
+        PG(cx, cy - .8 * h, cx + .85 * h, cy - .4 * h, cx, cy, cx - .85 * h, cy - .4 * h)
+        L(cx - .85 * h, cy + .05 * h, cx, cy + .45 * h, cx + .85 * h, cy + .05 * h)
+        L(cx - .85 * h, cy + .5 * h, cx, cy + .9 * h, cx + .85 * h, cy + .5 * h)
+    elif kind == "circle":
+        O(*o(.75))
+    elif kind == "check":
+        O(*o(.78))
+        L(cx - .35 * h, cy, cx - .08 * h, cy + .3 * h, cx + .4 * h, cy - .3 * h)
+    elif kind == "video":
+        R(cx - .8 * h, cy - .6 * h, cx + .8 * h, cy + .6 * h)
+        L(cx - .4 * h, cy - .6 * h, cx - .4 * h, cy + .6 * h)
+        L(cx + .4 * h, cy - .6 * h, cx + .4 * h, cy + .6 * h)
+    elif kind == "music":
+        c.create_oval(cx - .65 * h, cy + .15 * h, cx - .05 * h, cy + .7 * h, fill=col, outline=col)
+        L(cx - .05 * h, cy + .4 * h, cx - .05 * h, cy - .7 * h, cx + .6 * h, cy - .45 * h)
+    elif kind in ("doc", "zip", "file"):
+        PG(cx - .55 * h, cy - .8 * h, cx + .2 * h, cy - .8 * h, cx + .55 * h, cy - .45 * h,
+           cx + .55 * h, cy + .8 * h, cx - .55 * h, cy + .8 * h)
+        if kind == "doc":
+            L(cx - .25 * h, cy, cx + .25 * h, cy)
+            L(cx - .25 * h, cy + .35 * h, cx + .25 * h, cy + .35 * h)
+        elif kind == "zip":
+            L(cx, cy - .6 * h, cx, cy - .05 * h)
+            R(cx - .15 * h, cy, cx + .15 * h, cy + .4 * h)
+    elif kind == "app":
+        R(cx - .8 * h, cy - .65 * h, cx + .8 * h, cy + .65 * h)
+        L(cx - .8 * h, cy - .25 * h, cx + .8 * h, cy - .25 * h)
+    elif kind == "image":
+        R(cx - .8 * h, cy - .65 * h, cx + .8 * h, cy + .65 * h)
+        L(cx - .8 * h, cy + .45 * h, cx - .25 * h, cy - .05 * h, cx + .1 * h, cy + .3 * h,
+          cx + .4 * h, cy + .05 * h, cx + .8 * h, cy + .45 * h)
+    elif kind == "sun":
+        O(*o(.38))
+        for i in range(8):
+            a = i * math.pi / 4
+            L(cx + .62 * h * math.cos(a), cy + .62 * h * math.sin(a),
+              cx + .92 * h * math.cos(a), cy + .92 * h * math.sin(a))
+    elif kind == "moon":
+        c.create_arc(*o(.8), start=50, extent=270, style="arc", outline=col, width=w)
+        L(cx + .5 * h, cy - .62 * h, cx + .05 * h, cy - .05 * h)
+    elif kind == "search":
+        O(cx - .75 * h, cy - .75 * h, cx + .15 * h, cy + .15 * h)
+        L(cx + .1 * h, cy + .1 * h, cx + .75 * h, cy + .75 * h)
+
+
+class MenuBar(tk.Frame):
+    def __init__(self, parent, items, on_theme):
+        super().__init__(parent, bd=0, highlightthickness=0)
+        self.labels = []
+        for title, menu in items:
+            l = tk.Label(self, text=title, padx=S(12), pady=S(9), font=(FONT, 10), cursor="hand2", bd=0)
+            l.pack(side="left")
+            l.bind("<Enter>", lambda e, l=l: l.configure(bg=P["hover"]))
+            l.bind("<Leave>", lambda e, l=l: l.configure(bg=P["bg"]))
+            l.bind("<Button-1>", lambda e, l=l, m=menu: self.pop(l, m))
+            self.labels.append(l)
+        self.theme = tk.Canvas(self, width=S(46), height=S(34), highlightthickness=0, bd=0, cursor="hand2")
+        self.theme.pack(side="right")
+        self.theme.bind("<Button-1>", lambda e: on_theme())
+
+    def pop(self, l, m):
+        try:
+            m.tk_popup(l.winfo_rootx(), l.winfo_rooty() + l.winfo_height())
+        finally:
+            m.grab_release()
+
+    def restyle(self):
+        self.configure(bg=P["bg"])
+        for l in self.labels:
+            l.configure(bg=P["bg"], fg=P["fg"])
+        t = self.theme
+        t.delete("all")
+        t.configure(bg=P["bg"])
+        glyph(t, "sun" if P["dark"] else "moon", S(23), S(17), S(17), P["sub"], 2)
+
+
+class Toolbar(tk.Canvas):
+    BTNS = [("add", "plus", "Add URL"), None,
+            ("resume", "play", "Resume"), ("stop", "stop", "Stop"), ("stopall", "stopall", "Stop All"), None,
+            ("delete", "trash", "Delete"), ("clear", "eraser", "Clear Done"), None,
+            ("options", "gear", "Options"), ("sched", "clock", "Scheduler"),
+            ("startq", "startq", "Start Queue"), ("stopq", "stopq", "Stop Queue")]
+
+    def __init__(self, parent, cmds):
+        super().__init__(parent, height=S(80), highlightthickness=0, bd=0)
+        self.cmds, self.en, self.hover, self.hits = cmds, {}, None, []
+        self.f = tkfont.Font(family=FONT, size=9)
+        self.bind("<Configure>", lambda e: self.redraw())
+        self.bind("<Motion>", self.motion)
+        self.bind("<Leave>", lambda e: self.set_hover(None))
+        self.bind("<Button-1>", self.click)
+
+    def enable(self, d):
+        if d != self.en:
+            self.en = d
+            self.redraw()
+
+    def at(self, e):
+        return next((k for x0, x1, k in self.hits if x0 <= e.x < x1), None)
+
+    def set_hover(self, k):
+        if k != self.hover:
+            self.hover = k
+            self.configure(cursor="hand2" if k and self.en.get(k, True) else "")
+            self.redraw()
+
+    def motion(self, e):
+        self.set_hover(self.at(e))
+
+    def click(self, e):
+        k = self.at(e)
+        if k and self.en.get(k, True):
+            self.cmds[k]()
+
+    def redraw(self):
+        self.delete("all")
+        self.configure(bg=P["bg"])
+        self.hits = []
+        x, bw = S(14), S(74)
+        for b in self.BTNS:
+            if b is None:
+                self.create_line(x + S(5), S(20), x + S(5), S(62), fill=P["border"])
+                x += S(10)
+                continue
+            key, ic, label = b
+            on = self.en.get(key, True)
+            col = P["accent"] if key == "add" else P["err"] if key in ("stop", "stopall") else P["fg"]
+            if not on:
+                col = mix(P["sub"], P["bg"], .4)
+            mid = x + bw // 2
+            if self.hover == key and on:
+                rrect(self, x, S(6), x + bw, S(74), S(8), fill=P["hover"], outline="")
+            if key == "add":
+                rrect(self, mid - S(19), S(9), mid + S(19), S(47), S(8), fill=mix(P["accent"], P["bg"], .82), outline="")
+            glyph(self, ic, mid, S(28), S(20), col, 2)
+            self.create_text(mid, S(60), text=label, font=self.f, fill=col if on else mix(P["sub"], P["bg"], .4))
+            self.hits.append((x, x + bw, key))
+            x += bw
+
+
+class SearchBox(tk.Frame):
+    HINT = "Search downloads"
+
+    def __init__(self, parent, on_change):
+        super().__init__(parent, bd=0, highlightthickness=1)
+        self.on_change, self.empty = on_change, True
+        self.icon = tk.Canvas(self, width=S(32), height=S(36), highlightthickness=0, bd=0)
+        self.icon.pack(side="left")
+        self.e = tk.Entry(self, relief="flat", bd=0, highlightthickness=0, font=(FONT, 10), width=26)
+        self.e.pack(side="left", fill="both", expand=True, padx=(0, S(10)), pady=S(8))
+        self.e.bind("<FocusIn>", self._in)
+        self.e.bind("<FocusOut>", self._out)
+        self.e.bind("<KeyRelease>", lambda e: self.on_change())
+        self.e.bind("<Escape>", lambda e: (self.clear(), self.on_change()))
+        self.e.insert(0, self.HINT)
 
     def _in(self, _=None):
         if self.empty:
-            self.delete(0, "end")
+            self.e.delete(0, "end")
             self.empty = False
         self.restyle()
 
     def _out(self, _=None):
-        if not self.get():
+        if not self.e.get():
             self.empty = True
-            self.insert(0, self.hint)
+            self.e.insert(0, self.HINT)
         self.restyle()
 
-    def restyle(self):
-        self.configure(foreground=P["sub"] if self.empty else P["fg"])
-
     def value(self):
-        return "" if self.empty else self.get()
+        return "" if self.empty else self.e.get().strip()
 
     def clear(self):
-        self.delete(0, "end")
+        self.e.delete(0, "end")
         self.empty = False
         self._out()
 
+    def restyle(self):
+        self.configure(bg=P["panel"], highlightbackground=P["border"], highlightcolor=P["accent"])
+        self.icon.configure(bg=P["panel"])
+        self.icon.delete("all")
+        glyph(self.icon, "search", S(17), S(18), S(15), P["sub"], 2)
+        self.e.configure(bg=P["panel"], fg=P["sub"] if self.empty else P["fg"], insertbackground=P["fg"])
+
+
+CAT_GLYPH = {"Video": "video", "Music": "music", "Documents": "doc", "Compressed": "zip",
+             "Programs": "app", "Images": "image", "Other": "file"}
+CAT_NAME = {"Documents": "Document", "Programs": "Program"}
+
 
 class Side(tk.Canvas):
-    ITEMS = ([("h", "LIBRARY"), ("all", "All downloads"), ("unfinished", "In progress"),
-              ("completed", "Completed"), ("h", "CATEGORIES")] +
-             [("c:" + c, c) for c in CAT_LIST])
-
     def __init__(self, parent, on_pick):
-        super().__init__(parent, width=S(224), highlightthickness=0, bd=0)
+        super().__init__(parent, width=S(214), highlightthickness=0, bd=0)
         self.on_pick, self.cur, self.counts, self.rows = on_pick, "all", {}, []
         self.f = tkfont.Font(family=FONT, size=10)
         self.fh = tkfont.Font(family=FONT, size=8, weight="bold")
         self.bind("<Button-1>", self.click)
         self.bind("<Configure>", lambda e: self.redraw())
+
+    def items(self):
+        c = self.counts
+        rows = [("h", "CATEGORIES", None, 0), ("all", "All Downloads", "layers", 0)]
+        for cat in CAT_LIST:
+            if c.get("c:" + cat, 0) or self.cur == "c:" + cat:
+                rows.append(("c:" + cat, CAT_NAME.get(cat, cat), CAT_GLYPH[cat], 1))
+        return rows + [("unfinished", "Unfinished", "circle", 0), ("completed", "Finished", "check", 0),
+                       ("h", "QUEUES", None, 0), ("queue", "Main queue", "clock", 0)]
 
     def set_counts(self, counts):
         if counts != self.counts:
@@ -1043,28 +1252,29 @@ class Side(tk.Canvas):
                 self.cur = key
                 self.on_pick(key)
                 self.redraw()
+                return
 
     def redraw(self):
         self.delete("all")
         self.configure(bg=P["bg"])
-        W, y = self.winfo_width(), S(2)
+        W, y = self.winfo_width(), S(6)
         self.rows = []
-        lib = {"all": P["accent"], "unfinished": "#f59e0b", "completed": P["ok"]}
-        for key, label in self.ITEMS:
+        for key, label, ic, lvl in self.items():
             if key == "h":
-                y += S(12)
-                self.create_text(S(14), y + S(8), anchor="w", text=label, fill=P["sub"],
-                                 font=self.fh)
-                y += S(22)
+                y += S(10)
+                self.create_text(S(18), y + S(8), anchor="w", text=label, fill=P["sub"], font=self.fh)
+                y += S(24)
                 continue
-            h = S(42)
-            if key == self.cur:
-                rrect(self, S(2), y, W - S(2), y + h - S(4), S(6), fill=P["sel"], outline="")
-            col = CAT_COL[key[2:]] if key.startswith("c:") else lib[key]
-            cy, r = y + (h - S(4)) // 2, S(5)
-            self.create_oval(S(16), cy - r, S(16) + 2 * r, cy + r, fill=col, outline="")
-            self.create_text(S(36), cy, anchor="w", text=label, fill=P["fg"], font=self.f)
-            self.create_text(W - S(14), cy, anchor="e", text=str(self.counts.get(key, 0)),
+            h = S(36)
+            on = key == self.cur
+            if on:
+                rrect(self, S(4), y, W - S(4), y + h - S(2), S(6), fill=P["sel"], outline="")
+            col = P["accent"] if on else P["sub"] if lvl else P["fg"]
+            cy = y + (h - S(2)) // 2
+            glyph(self, ic, S(24) + lvl * S(14), cy, S(15), col, 1 if lvl else 2)
+            self.create_text(S(44) + lvl * S(14), cy, anchor="w", text=label, font=self.f,
+                             fill=P["accent"] if on else P["fg"])
+            self.create_text(W - S(16), cy, anchor="e", text=str(self.counts.get(key, 0)),
                              fill=P["sub"], font=self.f)
             self.rows.append((y, y + h, key))
             y += h
@@ -1074,11 +1284,10 @@ class JobList(tk.Canvas):
     def __init__(self, parent, app):
         super().__init__(parent, highlightthickness=0, bd=0, takefocus=1)
         self.app, self.jobs, self.sel, self.anchor = app, [], set(), None
-        self.off, self.hover, self.hits, self.drop, self.sb = 0, None, [], False, None
-        self.fn = tkfont.Font(family=FONT, size=10, weight="bold")
+        self.off, self.hover, self.drop, self.sb = 0, None, False, None
+        self.fn = tkfont.Font(family=FONT, size=10)
         self.fs = tkfont.Font(family=FONT, size=9)
-        self.fb = tkfont.Font(family=FONT, size=8, weight="bold")
-        self.fp = tkfont.Font(family=FONT, size=11, weight="bold")
+        self.fh = tkfont.Font(family=FONT, size=8, weight="bold")
         self.bind("<Configure>", lambda e: self.redraw())
         self.bind("<Button-1>", self.click)
         self.bind("<Double-1>", self.double)
@@ -1088,11 +1297,14 @@ class JobList(tk.Canvas):
         self.bind("<Leave>", lambda e: self.set_hover(None))
         self.bind("<Delete>", lambda e: app.remove())
         self.bind("<Control-a>", lambda e: self.select_all())
-        self.bind("<Control-v>", lambda e: app.paste())
 
     @property
     def RH(self):                       # row height follows the "Download list size" setting
-        return S(60) if CFG.get("density", "compact") == "compact" else S(86)
+        return S(40) if CFG.get("density", "compact") == "compact" else S(54)
+
+    @property
+    def HH(self):
+        return S(40)
 
     # --- model
     def set_jobs(self, jobs):
@@ -1107,15 +1319,19 @@ class JobList(tk.Canvas):
     def select_all(self):
         self.sel = {j.id for j in self.jobs}
         self.redraw()
+        self.app.update_tb()
 
     def total_h(self):
-        return len(self.jobs) * self.RH + S(8)
+        return len(self.jobs) * self.RH + S(4)
+
+    def view_h(self):
+        return max(1, self.winfo_height() - self.HH)
 
     def yview(self, *a):
         if a[0] == "moveto":
             self.off = int(float(a[1]) * self.total_h())
         else:
-            step = self.RH // 2 if a[2] == "units" else self.winfo_height() * 9 // 10
+            step = self.RH if a[2] == "units" else self.view_h() * 9 // 10
             self.off += int(a[1]) * step
         self.redraw()
 
@@ -1125,21 +1341,13 @@ class JobList(tk.Canvas):
 
     # --- events
     def idx_at(self, y):
-        i = (y + self.off - S(4)) // self.RH
+        if y < self.HH:
+            return None
+        i = (y - self.HH + self.off) // self.RH
         return i if 0 <= i < len(self.jobs) else None
-
-    def hit(self, e):
-        for x0, y0, x1, y1, act, jid in self.hits:
-            if x0 <= e.x <= x1 and y0 <= e.y <= y1:
-                return act, jid
-        return None
 
     def click(self, e):
         self.focus_set()
-        h = self.hit(e)
-        if h:
-            self.app.row_action(*h)
-            return
         i = self.idx_at(e.y)
         if i is None:
             self.sel.clear()
@@ -1155,6 +1363,7 @@ class JobList(tk.Canvas):
             else:
                 self.sel, self.anchor = {j.id}, j.id
         self.redraw()
+        self.app.update_tb()
 
     def rclick(self, e):
         self.focus_set()
@@ -1164,21 +1373,19 @@ class JobList(tk.Canvas):
         if self.jobs[i].id not in self.sel:
             self.sel, self.anchor = {self.jobs[i].id}, self.jobs[i].id
             self.redraw()
+            self.app.update_tb()
         try:
             self.app.menu.tk_popup(e.x_root, e.y_root)
         finally:
             self.app.menu.grab_release()
 
     def double(self, e):
-        if self.hit(e):
-            return
         i = self.idx_at(e.y)
         if i is not None:
             self.app.dbl(self.jobs[i])
 
     def motion(self, e):
         i = self.idx_at(e.y)
-        self.configure(cursor="hand2" if self.hit(e) else "")
         self.set_hover(self.jobs[i].id if i is not None else None)
 
     def set_hover(self, jid):
@@ -1187,110 +1394,145 @@ class JobList(tk.Canvas):
             self.redraw()
 
     # --- drawing
-    def sub(self, j):
-        d, t = j.done, j.total
-        if j.note and j.status == "Downloading":
-            return j.note
-        if j.status == "Done":
-            return f"{human(t or d)}  \u00b7  Completed"
-        if j.status.startswith("Error"):
-            return j.status
-        if j.status in ("Connecting", "Waiting"):
-            return "Connecting..." if j.status == "Connecting" else "Waiting in queue"
-        size = f"{human(d)} of {human(t)}" if t else human(d)
-        if j.status == "Downloading":
-            s = f"{size}  \u00b7  {human(j.speed)}/s" if j.speed else size
-            if j.speed > 1 and t:
-                s += f"  \u00b7  {fmt_eta((t - d) / j.speed)} left"
-            return s
-        return f"{size}  \u00b7  {j.status}"
+    def cols(self, W):
+        pad = S(8)
+        d = W - pad - S(84)
+        r = d - S(104)
+        l = r - S(88)
+        s = l - S(224)
+        z = s - S(96)
+        return dict(name=S(18), size=z, status=s, left=l, rate=r, date=d)
 
-    def pill(self, x0, y0, x1, y1, text, act, jid, accent=False):
-        rrect(self, x0, y0, x1, y1, S(5), fill=P["sel"] if accent else P["bar"],
-              outline="")
-        self.create_text((x0 + x1) // 2, (y0 + y1) // 2, text=text, font=self.fs,
-                         fill=P["accent"] if accent else P["fg"])
-        self.hits.append((x0, y0, x1, y1, act, jid))
+    def stripes(self, x0, x1, y0, y1, col):
+        per, h = S(10), y1 - y0
+        x = x0 - h - per + int(time.time() * 20) % per
+        while x < x1:
+            xa, ya, xb, yb = x, y1, x + h, y0
+            if xa < x0:
+                ya, xa = y1 - (x0 - xa), x0
+            if xb > x1:
+                yb, xb = y0 + (xb - x1), x1
+            if xa < xb:
+                self.create_line(xa, ya, xb, yb, fill=col, width=S(2))
+            x += per
 
-    def row(self, j, y, W):
+    def row(self, j, y, W, X):
+        RH = self.RH
         sel, hov = j.id in self.sel, self.hover == j.id
-        x0, x1, y0, y1 = S(2), W - S(2), y + S(4), y + self.RH - S(4)
-        rrect(self, x0, y0, x1, y1, S(6),
-              fill=P["sel"] if sel else P["hover"] if hov else P["panel"],
-              outline=P["accent"] if sel else P["border"])
-        cp = CFG.get("density", "compact") == "compact"
-        bs = S(32) if cp else S(44)
-        bx, by = x0 + S(14), (y0 + y1) // 2 - bs // 2
-        rrect(self, bx, by, bx + bs, by + bs, S(6), fill=mix(CAT_COL[j.cat], P["panel"], .87), outline="")
-        ext = os.path.splitext(j.name)[1].lstrip(".").upper()[:4] or (
-            "MP3" if j.mp3 else "AUD" if j.audio else "VID" if j.kind != "file" else "FILE")
-        self.create_text(bx + bs // 2, by + bs // 2, text=ext, fill=CAT_COL[j.cat], font=self.fb)
-
-        ph, pw, gap = (S(24), S(66), S(6)) if cp else (S(28), S(76), S(8))
-        py = (y0 + y1) // 2 - ph // 2
-        right = x1 - S(14)
-        st = j.status
+        if sel or hov:
+            self.create_rectangle(0, y, W, y + RH, fill=P["sel"] if sel else P["hover"], outline="")
+        self.create_line(0, y + RH - 1, W, y + RH - 1, fill=P["border"])
+        cy = y + RH // 2
+        glyph(self, CAT_GLYPH[j.cat], X["name"] + S(9), cy, S(18), P["fg"] if sel else P["sub"], 1)
+        self.create_text(X["name"] + S(34), cy, anchor="w", font=self.fn, fill=P["fg"],
+                         text=fit(j.name, self.fn, X["size"] - X["name"] - S(46)))
+        d, t, st = j.done, j.total, j.status
+        self.create_text(X["size"], cy, anchor="w", font=self.fs, fill=P["fg"],
+                         text=human(t or d) if (t or d) else "—")
+        sx, bw, bh = X["status"], S(104), S(6)
+        err, run = st.startswith("Error"), st in RUNNING
         if st == "Done":
-            self.pill(right - pw, py, right, py + ph, "Open", "open", j.id, True)
-            self.pill(right - 2 * pw - gap, py, right - pw - gap, py + ph, "Folder", "folder", j.id)
-            left = right - 2 * pw - gap
-        elif st in RUNNING:
-            self.pill(right - pw, py, right, py + ph, "Pause", "pause", j.id)
-            self.pill(right - 2 * pw - gap, py, right - pw - gap, py + ph, "Details", "details", j.id)
-            left = right - 2 * pw - gap
+            glyph(self, "check", sx + S(8), cy, S(15), P["ok"], 1)
+            self.create_text(sx + S(24), cy, anchor="w", text="Complete", font=self.fs, fill=P["ok"])
         else:
-            lab = "Retry" if st.startswith("Error") else "Resume" if st == "Paused" else "Start"
-            self.pill(right - pw, py, right, py + ph, lab, "start", j.id, True)
-            left = right - pw
-
-        tx = bx + bs + S(16)
-        d = j.done
-        pct = 100 if st == "Done" else (d * 100 // j.total if j.total else 0)
-        known = bool(j.total) or st == "Done"
-        pw_txt = S(54)
-        if known:
-            self.create_text(left - S(14), y0 + (S(13) if cp else S(18)), anchor="e", font=self.fp,
-                             text=f"{pct}%", fill=P["ok"] if st == "Done" else P["fg"])
-        avail = left - S(14) - pw_txt - tx
-        self.create_text(tx, y0 + (S(13) if cp else S(18)), anchor="w", font=self.fn, fill=P["fg"],
-                         text=fit(j.name, self.fn, avail))
-        err = st.startswith("Error")
-        self.create_text(tx, y0 + (S(29) if cp else S(38)), anchor="w", font=self.fs,
-                         fill=P["err"] if err else P["sub"],
-                         text=fit(self.sub(j), self.fs, left - S(14) - tx))
-        bh = S(4) if cp else S(6)
-        by0, bx1 = y1 - (S(9) if cp else S(15)), left - S(14)
-        rrect(self, tx, by0, bx1, by0 + bh, S(2), fill=P["bar"], outline="")
-        w = int((bx1 - tx) * pct / 100)
-        if w > S(6):
-            col = (P["ok"] if st == "Done" else P["err"] if err else
-                   P["accent"] if st in RUNNING else P["sub"])
-            rrect(self, tx, by0, tx + w, by0 + bh, S(2), fill=col, outline="")
+            by0 = cy - bh // 2
+            rrect(self, sx, by0, sx + bw, by0 + bh, S(3), fill=P["bar"], outline="")
+            pct = min(100.0, d * 100 / t) if t else 0.0
+            col = (P["err"] if err else P["accent"] if run else P["warn"] if st == "Paused" else P["sub"])
+            w = int(bw * pct / 100)
+            if run and not t and st == "Downloading":
+                w = bw
+            if w > S(6) and st not in ("Queued", "Waiting"):
+                rrect(self, sx, by0, sx + w, by0 + bh, S(3), fill=col, outline="")
+                if run:
+                    self.stripes(sx + S(2), sx + w - S(2), by0 + 1, by0 + bh - 1, mix(col, "#ffffff", .3))
+            if j.note and st == "Downloading":
+                txt = fit(j.note, self.fs, S(88))
+            elif err:
+                txt = "Error"
+            elif st == "Downloading":
+                txt = f"{pct:.1f}%" if t else "Downloading"
+            elif st in ("Waiting", "Queued"):
+                txt = "Queued"
+            else:
+                txt = st if st != "Connecting" else "Connecting"
+            self.create_text(sx + S(198), cy, anchor="e", text=txt, font=self.fs,
+                             fill=P["fg"] if run else P["err"] if err else P["sub"])
+        left = fmt_eta((t - d) / j.speed) if st == "Downloading" and j.speed > 1 and t else "—"
+        rate = f"{human(j.speed)}/s" if st == "Downloading" and j.speed else "—"
+        self.create_text(X["left"], cy, anchor="w", text=left, font=self.fs, fill=P["sub"] if left == "—" else P["fg"])
+        self.create_text(X["rate"], cy, anchor="w", text=rate, font=self.fs, fill=P["sub"] if rate == "—" else P["fg"])
+        self.create_text(X["date"], cy, anchor="w", font=self.fs, fill=P["sub"],
+                         text=time.strftime("%b %d", time.localtime(j.added)) if j.added else "")
 
     def redraw(self):
         self.delete("all")
-        self.hits = []
         self.configure(bg=P["bg"])
-        W, H = self.winfo_width(), self.winfo_height()
-        self.off = max(0, min(self.off, max(0, self.total_h() - H)))
+        W, H, HH = self.winfo_width(), self.winfo_height(), self.HH
+        self.off = max(0, min(self.off, max(0, self.total_h() - (H - HH))))
+        X = self.cols(W)
         if not self.jobs:
-            self.create_text(W // 2, H // 2 - S(14), text="Nothing here yet", fill=P["fg"],
-                             font=(FONT, 14, "bold"))
-            self.create_text(W // 2, H // 2 + S(16), fill=P["sub"], font=self.fs,
-                             text="Paste a link, copy links anywhere, or drop them onto this window")
+            self.create_text(W // 2, H // 2 + S(10), text="Nothing here yet", fill=P["fg"], font=(FONT, 14, "bold"))
+            self.create_text(W // 2, H // 2 + S(40), fill=P["sub"], font=self.fs,
+                             text="Click Add URL, copy links anywhere, or drop them onto this window")
         else:
-            i0 = max(0, (self.off - S(4)) // self.RH)
-            i1 = min(len(self.jobs), (self.off + H) // self.RH + 1)
+            i0 = max(0, self.off // self.RH)
+            i1 = min(len(self.jobs), (self.off + H - HH) // self.RH + 1)
             for i in range(i0, i1):
-                self.row(self.jobs[i], S(4) + i * self.RH - self.off, W)
+                self.row(self.jobs[i], HH + i * self.RH - self.off, W, X)
+        self.create_rectangle(0, 0, W, HH, fill=P["bg"], outline="")
+        self.create_line(0, HH - 1, W, HH - 1, fill=P["border"])
+        for k, t in (("name", "FILE NAME"), ("size", "SIZE"), ("status", "STATUS"),
+                     ("left", "TIME LEFT"), ("rate", "SPEED"), ("date", "DATE")):
+            self.create_text(X[k], HH // 2, anchor="w", text=t, font=self.fh, fill=P["sub"])
         if self.drop:
-            rrect(self, S(4), S(4), W - S(4), H - S(4), S(14), fill=mix(P["accent"], P["bg"], .88),
+            rrect(self, S(6), S(6), W - S(6), H - S(6), S(14), fill=mix(P["accent"], P["bg"], .88),
                   outline=P["accent"], width=2, dash=(6, 4))
             self.create_text(W // 2, H // 2, text="Drop links here to download", fill=P["accent"],
                              font=(FONT, 16, "bold"))
         if self.sb:
-            T = max(self.total_h(), 1)
-            self.sb.set(self.off / T, min(1.0, (self.off + H) / T))
+            T, V = max(self.total_h(), 1), self.view_h()
+            self.sb.set(self.off / T, min(1.0, (self.off + V) / T))
+
+
+class AddDialog(tk.Toplevel):
+    def __init__(self, app):
+        super().__init__(app.root)
+        self.app = app
+        self.title("Add URL")
+        self.configure(bg=P["bg"])
+        self.transient(app.root)
+        self.resizable(False, False)
+        f = ttk.Frame(self, padding=S(18))
+        f.pack(fill="both", expand=True)
+        ttk.Label(f, text="Add download links", font=(FONT, 12, "bold")).pack(anchor="w")
+        ttk.Label(f, text="Paste one or more links, one per line.", style="Sub.TLabel").pack(
+            anchor="w", pady=(0, S(8)))
+        self.t = tk.Text(f, width=64, height=7, wrap="none", relief="flat", bd=0, highlightthickness=1,
+                         highlightbackground=P["border"], highlightcolor=P["accent"], bg=P["panel"],
+                         fg=P["fg"], insertbackground=P["fg"], font=(FONT, 10), padx=S(8), pady=S(8))
+        self.t.pack(fill="both", expand=True)
+        try:                                    # start with the links on the clipboard, if any
+            self.t.insert("1.0", "\n".join(app.urls_in(app.root.clipboard_get())))
+        except tk.TclError:
+            pass
+        row = ttk.Frame(f)
+        row.pack(fill="x", pady=(S(14), 0))
+        ttk.Button(row, text="Add", style="Accent.TButton", command=self.go).pack(side="right")
+        ttk.Button(row, text="Cancel", command=self.destroy).pack(side="right", padx=8)
+        self.bind("<Control-Return>", lambda e: self.go())
+        self.bind("<Escape>", lambda e: self.destroy())
+        self.update_idletasks()
+        r = app.root
+        self.geometry(f"+{r.winfo_rootx() + max(0, (r.winfo_width() - self.winfo_reqwidth()) // 2)}"
+                      f"+{r.winfo_rooty() + S(110)}")
+        titlebar(self, P["dark"])
+        self.t.focus_set()
+
+    def go(self):
+        text = self.t.get("1.0", "end")
+        self.destroy()
+        self.app.offer(self.app.urls_in(text))
 
 
 class Pop(tk.Toplevel):
@@ -1670,7 +1912,7 @@ class App:
         self.load()
         root.title("MyDM " + VERSION)
         root.geometry(CFG["geom"] or f"{S(1220)}x{S(780)}")
-        root.minsize(S(940), S(520))
+        root.minsize(S(1100), S(520))
         init_fonts(root)
         apply_theme(root)
         self.icon = make_icon()
@@ -1680,50 +1922,91 @@ class App:
         except tk.TclError:
             pass
 
-        hdr = ttk.Frame(root, padding=(S(24), S(22), S(24), S(16)))
-        hdr.pack(fill="x")
-        self.logo = self.icon.subsample(2, 2)
-        ttk.Label(hdr, image=self.logo).pack(side="left")
-        ttk.Label(hdr, text="MyDM", font=(FONT, 19, "bold")).pack(side="left", padx=(S(8), S(4)))
-        ttk.Label(hdr, text="v" + VERSION, style="Sub.TLabel").pack(side="left", padx=(0, S(14)))
-        self.entry = Hint(hdr, "Paste a download link")
-        self.entry.pack(side="left", fill="x", expand=True)
-        self.entry.bind("<Return>", lambda e: self.add())
-        ttk.Button(hdr, text="+  Add download", style="Accent.TButton", command=self.add).pack(
-            side="left", padx=(S(8), 0))
+        self.menus, self.lines = [], []
+        self.status, self.speed_txt, self.sched_txt = tk.StringVar(), tk.StringVar(), tk.StringVar()
 
-        tb = ttk.Frame(root, padding=(S(24), 0, S(24), S(18)))
-        tb.pack(fill="x")
-        for t, c in [("▶  Start", self.start), ("Ⅱ  Pause", self.pause),
-                     ("▶▶  Start all", lambda: self.start(JOBS)),
-                     ("■  Stop all", lambda: self.pause_jobs(JOBS)),
-                     ("×  Remove", self.remove),
-                     ("Delete file", lambda: self.remove(True))]:
-            ttk.Button(tb, text=t, command=c).pack(side="left", padx=(0, S(8)))
-        ttk.Separator(tb, orient="vertical").pack(side="left", fill="y", padx=S(8))
-        tools = tk.Menu(root, tearoff=0)
-        for label, cmd in [("Paste links", self.paste), ("Import downloads…", self.imp),
-                           ("Export downloads…", self.exp), (None, None),
-                           ("Show progress window", self.show_pop),
-                           ("Clear completed downloads", self.clear)]:
-            tools.add_separator() if label is None else tools.add_command(label=label, command=cmd)
-        ttk.Menubutton(tb, text="More", menu=tools, width=7).pack(side="left")
-        self.tools_menu = tools
-        ttk.Button(tb, text="⚙  Settings", command=self.settings).pack(side="right")
-        ttk.Button(tb, text="◷  Scheduler", command=self.scheduler).pack(
-            side="right", padx=(0, S(8)))
+        def line(parent, **pk):
+            f = tk.Frame(parent, bd=0, highlightthickness=0, **({"height": 1} if pk.get("fill") == "x" else {"width": 1}))
+            f.pack(**pk)
+            self.lines.append(f)
+            return f
 
-        foot = ttk.Frame(root, padding=(S(16), S(4), S(16), S(10)))
+        def menu(items):
+            m = tk.Menu(root, tearoff=0)
+            for it in items:
+                if it is None:
+                    m.add_separator()
+                else:
+                    m.add_command(label=it[0], command=it[1])
+            self.menus.append(m)
+            return m
+
+        def theme_menu():
+            m = tk.Menu(root, tearoff=0)
+            for lab, key in (("System", "system"), ("Light", "light"), ("Dark", "dark")):
+                m.add_command(label="Theme: " + lab, command=lambda k=key: self.set_theme(k))
+            m.add_separator()
+            for lab, key in (("Compact", "compact"), ("Comfortable", "comfortable")):
+                m.add_command(label="List size: " + lab, command=lambda k=key: self.set_density(k))
+            self.menus.append(m)
+            return m
+
+        stop_running = lambda: self.pause_jobs([j for j in JOBS if j.status in RUNNING])
+        stop_queued = lambda: self.pause_jobs([j for j in JOBS if j.status == "Waiting"])
+        tasks = menu([("Add URL...", self.add), ("Paste links", self.paste), None,
+                      ("Import downloads...", self.imp), ("Export downloads...", self.exp), None,
+                      ("Scheduler", self.scheduler), ("Options", self.settings), None,
+                      ("Exit MyDM", self.close)])
+        files = menu([("Open file", self.open_file), ("Open folder", self.openf),
+                      ("Show progress window", self.show_pop), ("Copy link", self.copy_link)])
+        downs = menu([("Resume", lambda: self.start(self.selected())),
+                      ("Stop", lambda: self.pause_jobs(self.selected())), ("Stop all", stop_running), None,
+                      ("Start queue", lambda: self.start(JOBS)), ("Stop queue", stop_queued), None,
+                      ("Download again", self.redo), ("Remove from list", self.remove),
+                      ("Remove and delete file", lambda: self.remove(True)), None,
+                      ("Clear completed downloads", self.clear)])
+        helpm = menu([("Open extension folder", lambda: open_path(ext_dir())),
+                      ("Open Chrome extensions page", open_chrome_ext),
+                      ("Update video engine", self.update_engine_bg), None,
+                      ("About MyDM", self.about)])
+        self.menubar = MenuBar(root, [("Tasks", tasks), ("File", files), ("Downloads", downs),
+                                      ("View", theme_menu()), ("Help", helpm)], self.toggle_theme)
+        self.menubar.pack(fill="x")
+        line(root, fill="x")
+
+        trow = tk.Frame(root, bd=0, highlightthickness=0)
+        trow.pack(fill="x")
+        self.trow = trow
+        self.tb = Toolbar(trow, {
+            "add": self.add, "resume": lambda: self.start(self.selected()),
+            "stop": lambda: self.pause_jobs(self.selected()), "stopall": stop_running,
+            "delete": self.remove, "clear": self.clear, "options": self.settings,
+            "sched": self.scheduler, "startq": lambda: self.start(JOBS), "stopq": stop_queued})
+        self.search = SearchBox(trow, self.refilter)
+        self.search.pack(side="right", padx=(S(8), S(18)), pady=S(20))
+        self.tb.pack(side="left", fill="x", expand=True)
+        line(root, fill="x")
+
+        foot = tk.Frame(root, bd=0, highlightthickness=0)
         foot.pack(side="bottom", fill="x")
-        self.status, self.sched_txt = tk.StringVar(), tk.StringVar()
-        ttk.Label(foot, textvariable=self.status, style="Sub.TLabel").pack(side="left")
-        ttk.Label(foot, textvariable=self.sched_txt, style="Sub.TLabel").pack(side="right")
+        self.foot = foot
+        self.flbls = [tk.Label(foot, textvariable=self.status, bd=0, padx=S(18), pady=S(7), font=(FONT, 9)),
+                      tk.Label(foot, textvariable=self.speed_txt, bd=0, padx=S(18), pady=S(7), font=(FONT, 9)),
+                      tk.Label(foot, textvariable=self.sched_txt, bd=0, padx=S(4), pady=S(7), font=(FONT, 9))]
+        self.flbls[0].pack(side="left")
+        self.flbls[1].pack(side="right")
+        self.flbls[2].pack(side="right")
+        fl = tk.Frame(root, height=1, bd=0, highlightthickness=0)
+        fl.pack(side="bottom", fill="x")
+        self.lines.append(fl)
 
-        body = ttk.Frame(root, padding=(S(24), 0))
+        body = tk.Frame(root, bd=0, highlightthickness=0)
         body.pack(fill="both", expand=True)
+        self.body = body
         self.side = Side(body, self.set_filter)
-        self.side.pack(side="left", fill="y", padx=(0, S(20)))
-        right = ttk.Frame(body)
+        self.side.pack(side="left", fill="y")
+        line(body, side="left", fill="y")
+        right = tk.Frame(body, bd=0, highlightthickness=0)
         right.pack(side="left", fill="both", expand=True)
         self.lst = JobList(right, self)
         self.sb = ttk.Scrollbar(right, command=self.lst.yview)
@@ -1733,6 +2016,7 @@ class App:
         root.bind_all("<MouseWheel>", self.wheel)
         root.bind_all("<Button-4>", self.wheel)
         root.bind_all("<Button-5>", self.wheel)
+        root.bind("<Control-v>", self.ctrl_v)
 
         self.menu = tk.Menu(root, tearoff=0)
         for label, cmd in [("Start / Resume", self.start), ("Pause", self.pause), (None, None),
@@ -1764,16 +2048,60 @@ class App:
     # ---- theme ----
     def retheme(self):
         apply_theme(self.root)
-        self.menu.configure(bg=P["panel"], fg=P["fg"], activebackground=P["accent"],
-                            activeforeground="#ffffff", bd=0, relief="flat")
-        self.tools_menu.configure(bg=P["panel"], fg=P["fg"], activebackground=P["sel"],
-                                  activeforeground=P["accent"], bd=0, relief="flat")
-        self.entry.restyle()
+        for m in self.menus + [self.menu]:
+            m.configure(bg=P["panel"], fg=P["fg"], activebackground=P["sel"],
+                        activeforeground=P["accent"], bd=0, relief="flat")
+        for f in (self.trow, self.foot, self.body, self.lst.master):
+            f.configure(bg=P["bg"])
+        for f in self.lines:
+            f.configure(bg=P["border"])
+        for l in self.flbls:
+            l.configure(bg=P["bg"], fg=P["sub"])
+        self.menubar.restyle()
+        self.search.restyle()
         titlebar(self.root, P["dark"])
+        self.tb.redraw()
         self.side.redraw()
         self.lst.redraw()
         for p in self.pops.values():
             p.retheme()
+
+    def set_theme(self, t):
+        CFG["theme"] = t
+        self.save()
+        self.retheme()
+
+    def toggle_theme(self):
+        self.set_theme("light" if P["dark"] else "dark")
+
+    def set_density(self, d):
+        CFG["density"] = d
+        self.save()
+        self.lst.redraw()
+
+    def about(self):
+        messagebox.showinfo("About MyDM", f"MyDM {VERSION}\n\n" + self.video_status())
+
+    def update_engine_bg(self):
+        self.say("Updating the video engine...")
+        threading.Thread(target=lambda: self.say(update_engine()[1]), daemon=True).start()
+
+    def ctrl_v(self, e):
+        if not isinstance(self.root.focus_get(), (tk.Entry, tk.Text, ttk.Entry)):
+            self.paste()
+
+    def refilter(self):
+        self.lst.off = 0
+        self.lst.set_jobs([j for j in JOBS if self.match(j)])
+
+    def update_tb(self):
+        sel = self.selected()
+        can = lambda j: j.status in ("Queued", "Paused") or j.status.startswith("Error")
+        self.tb.enable({"resume": any(can(j) for j in sel), "stop": any(j.status in RUNNING for j in sel),
+                        "stopall": any(j.status in RUNNING for j in JOBS), "delete": bool(sel),
+                        "clear": any(j.status == "Done" for j in JOBS),
+                        "startq": any(can(j) for j in JOBS),
+                        "stopq": any(j.status == "Waiting" for j in JOBS)})
 
     # ---- state ----
     def load(self):
@@ -1890,8 +2218,7 @@ class App:
             self.start([j])
 
     def add(self):
-        self.offer(self.urls_in(self.entry.value()))
-        self.entry.clear()
+        AddDialog(self)
 
     def paste(self):
         try:
@@ -1935,582 +2262,3 @@ class App:
             return
         if kind == "link" and is_media(url):      # right-click on a link to a video site
             self.root.deiconify()
-            self.media_flow(url)
-            return
-        old = next((j for j in JOBS if j.url == url and j.status != "Done"), None)
-        if old:
-            self.start([old])
-            self.say("Already in the list")
-            return
-        j = Job(url, CFG["folder"], "stream" if kind == "stream" or is_stream_url(url) else "file")
-        j.referer, j.cookie, j.ua = m["referer"], m["cookie"], m["ua"]
-        if m["name"]:
-            j.name = clean(m["name"])
-        if j.kind == "stream":                         # ask which quality, if the stream offers several
-            def then(u, info):
-                if info["opts"]:
-                    self.root.deiconify()
-                    MediaDialog(self, u, {"title": j.name, "uploader": "HLS stream", "_job": j},
-                                info["opts"])
-                else:
-                    JOBS.append(j)
-                    self.save()
-                    self.say("Added from the browser: " + j.name)
-                    if m["action"] != "queue":
-                        self.start([j])
-            FetchDialog(self, url, lambda: {"opts": hls_choices(j)}, then)
-            return
-        JOBS.append(j)
-        self.save()
-        self.say("Added from the browser: " + j.name)
-        if m["action"] != "queue":
-            self.start([j])
-
-    def drag(self, on):
-        if on != self.lst.drop:
-            self.lst.drop = on
-            self.lst.redraw()
-        return "copy"
-
-    def on_drop(self, e):
-        self.drag(False)
-        urls = []
-        for item in self.root.tk.splitlist(e.data):
-            if os.path.isfile(item):
-                if os.path.splitext(item)[1].lower() in (".txt", ".url", ".lst", ".csv", ".html", ".htm"):
-                    try:
-                        with open(item, encoding="utf-8", errors="ignore") as f:
-                            urls += self.urls_in(f.read(2_000_000))
-                    except OSError:
-                        pass
-            else:
-                urls += self.urls_in(item)
-        if not urls:
-            urls = self.urls_in(e.data)
-        self.offer(urls, start=True)
-        return "copy"
-
-    # ---- list ops ----
-    def match(self, j):
-        f = self.flt
-        if f == "all":
-            return True
-        if f == "unfinished":
-            return j.status != "Done"
-        if f == "completed":
-            return j.status == "Done"
-        return j.cat == f[2:]
-
-    def set_filter(self, key):
-        self.flt = key
-        self.lst.sel.clear()
-        self.lst.off = 0
-        self.lst.set_jobs([j for j in JOBS if self.match(j)])
-
-    def selected(self):
-        return self.lst.selected()
-
-    def start(self, jobs=None):
-        for j in (jobs if jobs is not None else (self.selected() or JOBS)):
-            if j.status in ("Queued", "Paused") or j.status.startswith("Error"):
-                j.status = "Waiting"
-
-    def pause_jobs(self, jobs):
-        for j in jobs:
-            if j.status != "Done":
-                j.stop.set()
-                if j.status == "Waiting":
-                    j.status = "Paused"
-        self.save()
-
-    def pause(self):
-        self.pause_jobs(self.selected() or JOBS)
-
-    def remove(self, files=False):
-        sel = self.selected()
-        if files and sel and not messagebox.askyesno(
-                "Delete", f"Delete {len(sel)} file(s) from disk too?"):
-            return
-        for j in sel:
-            j.stop.set()
-            if j.path:
-                victim = j.path + ".part" if j.status != "Done" else (j.path if files else None)
-                try:
-                    victim and os.remove(victim)
-                except OSError:
-                    pass
-            if j.id in self.pops:
-                self.pops[j.id].hide()
-            JOBS.remove(j)
-        self.save()
-
-    def clear(self):
-        for j in [j for j in JOBS if j.status == "Done"]:
-            JOBS.remove(j)
-        self.save()
-
-    def redo(self):
-        for j in self.selected():
-            if j.status not in RUNNING:
-                if j.path and j.status != "Done":
-                    try:
-                        os.remove(j.path + ".part")
-                    except OSError:
-                        pass
-                j.segs, j.path, j.speed = [], "", 0.0
-                j.status = "Waiting"
-
-    def openf(self):
-        s = self.selected()
-        if s and s[0].path and os.path.exists(s[0].path):
-            open_path(s[0].path, select=True)
-        else:
-            open_path(s[0].dir if s else CFG["folder"])
-
-    def open_file(self):
-        s = self.selected()
-        if s and s[0].status == "Done" and os.path.exists(s[0].path):
-            open_path(s[0].path)
-
-    def copy_link(self):
-        s = self.selected()
-        if s:
-            t = "\n".join(j.url for j in s)
-            self.root.clipboard_clear()
-            self.root.clipboard_append(t)
-            self.last_clip = t
-
-    def show_pop(self):
-        for j in self.selected()[:3]:
-            self.open_pop(j)
-
-    def open_pop(self, j):
-        if j.id in self.pops:
-            self.pops[j.id].lift()
-            return
-        while len(self.pops) >= 4:
-            old = next((p for p in self.pops.values() if p.job.status not in RUNNING), None)
-            if not old:
-                return
-            old.hide()
-        self.pops[j.id] = Pop(self, j)
-
-    def row_action(self, act, jid):
-        j = next((x for x in JOBS if x.id == jid), None)
-        if not j:
-            return
-        if act == "pause":
-            self.pause_jobs([j])
-        elif act == "start":
-            self.start([j])
-        elif act == "open":
-            open_path(j.path)
-        elif act == "folder":
-            open_path(j.path, select=True) if j.path else open_path(j.folder)
-        elif act == "details":
-            self.open_pop(j)
-
-    def dbl(self, j):
-        if j.status == "Done" and os.path.exists(j.path):
-            open_path(j.path)
-        elif j.status in RUNNING:
-            self.open_pop(j)
-        else:
-            self.start([j])
-
-    def wheel(self, e):
-        try:
-            w = self.root.winfo_containing(e.x_root, e.y_root)
-        except (KeyError, tk.TclError):
-            return
-        if w is self.lst:
-            d = -1 if (getattr(e, "num", 0) == 4 or e.delta > 0) else 1
-            self.lst.scroll_px(d * self.lst.RH // 2)
-
-    # ---- settings ----
-    def video_status(self):
-        y = ytdlp()
-        v = getattr(getattr(y, "version", None), "__version__", "?") if y else "NOT LOADED - " + _YT[2]
-        js = find("qjs.exe" if WIN else "qjs") or shutil.which("deno")
-        return (f"Video engine (yt-dlp): {v}\nffmpeg: {'ok' if ffmpeg_path() else 'missing'}     "
-                f"JS engine: {'ok' if js else 'missing (YouTube may fail)'}")
-
-    def settings(self):
-        w = tk.Toplevel(self.root)
-        w.title("Settings")
-        w.transient(self.root)
-        w.resizable(False, False)
-        w.configure(bg=P["bg"])
-        outer = ttk.Frame(w, padding=(S(16), S(14), S(16), S(14)))
-        outer.pack()
-        nb = ttk.Notebook(outer)
-        nb.pack()
-        vs = {}
-
-        def page(title):
-            f = ttk.Frame(nb, padding=(S(14), S(14), S(14), S(10)))
-            nb.add(f, text=title)
-            return f
-
-        def field(f, r, label, key, width=30):
-            ttk.Label(f, text=label).grid(row=r, column=0, sticky="w", pady=S(4), padx=(0, S(14)))
-            vs[key] = tk.StringVar(value=str(CFG[key]))
-            ttk.Entry(f, textvariable=vs[key], width=width).grid(row=r, column=1, sticky="we")
-
-        def check(f, r, label, key):
-            vs[key] = tk.BooleanVar(value=CFG[key])
-            ttk.Checkbutton(f, text=label, variable=vs[key]).grid(
-                row=r, column=0, columnspan=3, sticky="w", pady=S(3))
-
-        def combo(f, r, label, key, values, value, width=26):
-            ttk.Label(f, text=label).grid(row=r, column=0, sticky="w", pady=S(4), padx=(0, S(14)))
-            vs[key] = tk.StringVar(value=value)
-            ttk.Combobox(f, textvariable=vs[key], state="readonly", width=width, values=values).grid(
-                row=r, column=1, sticky="w")
-
-        g = page("General")
-        field(g, 0, "Download folder", "folder")
-        ttk.Button(g, text="...", width=3, command=lambda: vs["folder"].set(
-            filedialog.askdirectory() or vs["folder"].get())).grid(row=0, column=2, padx=(S(6), 0))
-        check(g, 1, "Sort files into category folders (Video, Music, ...)", "subfolders")
-        check(g, 2, "Show a progress window when a download starts", "popup")
-        check(g, 3, "Play a sound when a download completes", "sound")
-        combo(g, 4, "Theme", "theme", ["System", "Light", "Dark"], CFG["theme"].capitalize(), 12)
-        combo(g, 6, "Download list size", "density", ["Compact", "Comfortable"],
-              CFG.get("density", "compact").capitalize(), 12)
-        vs["startup"] = tk.BooleanVar(value=False)
-        if WIN and getattr(sys, "frozen", False):
-            ttk.Checkbutton(g, text="Start MyDM with Windows (needed for scheduled downloads)",
-                            variable=vs["startup"]).grid(row=5, column=0, columnspan=3, sticky="w")
-
-        c = page("Connection")
-        field(c, 0, "Segments per file (1-32)", "segments", 8)
-        field(c, 1, "Parallel downloads (1-10)", "parallel", 8)
-        field(c, 2, "Speed limit KB/s (0 = unlimited)", "limit_kb", 8)
-        modes = {"system": "System proxy (automatic)", "direct": "No proxy", "manual": "Manual"}
-        combo(c, 3, "Proxy", "mode", list(modes.values()), modes[CFG["proxy_mode"]])
-        ttk.Label(c, style="Sub.TLabel", text="System proxy detected: " + (system_proxy() or "none")
-                  ).grid(row=4, column=1, sticky="w")
-        field(c, 5, "Manual proxy", "proxy")
-        ttk.Label(c, style="Sub.TLabel", text="http://host:port   or   socks5://host:port").grid(
-            row=6, column=1, sticky="w")
-
-        b = page("Browser")
-        ttk.Label(b, text="Clipboard", font=(FONT, 10, "bold")).grid(row=0, column=0, sticky="w")
-        check(b, 1, "Watch the clipboard for download links", "watch")
-        clips = {"ask": "Ask me (show a window)", "add": "Add to the list automatically"}
-        combo(b, 2, "When a link is found", "clip_mode", list(clips.values()), clips[CFG["clip_mode"]], 28)
-        check(b, 3, "Also start the download when links are added automatically", "autostart")
-        ttk.Label(b, text="Browser extension", font=(FONT, 10, "bold")).grid(
-            row=4, column=0, sticky="w", pady=(S(12), 0))
-        check(b, 5, "Accept downloads sent from the browser extension", "bridge")
-        ttk.Label(b, style="Sub.TLabel", text=(
-            f"MyDM {VERSION}   |   " + (f"listening on 127.0.0.1:{self.port}" if self.port
-                                        else "could not open a local port"))).grid(
-            row=6, column=0, columnspan=3, sticky="w")
-        br = ttk.Frame(b)
-        br.grid(row=7, column=0, columnspan=3, sticky="w", pady=(S(8), 0))
-        ttk.Button(br, text="Open extension folder", command=lambda: open_path(ext_dir())).pack(side="left")
-        ttk.Button(br, text="Open Chrome extensions page", command=open_chrome_ext).pack(
-            side="left", padx=6)
-
-        v = page("Video")
-        combo(v, 0, "Default quality", "ytq", ["Best", "1080p", "720p", "480p", "360p", "Audio (MP3)"],
-              CFG["ytq"], 14)
-        combo(v, 1, "Browser cookies", "cookies", ["none", "firefox", "edge", "chrome", "brave"],
-              CFG["cookies"] or "none", 14)
-        ttk.Label(v, style="Sub.TLabel", text="Needed when a site says \"sign in to confirm you're not a bot\".").grid(
-            row=2, column=1, sticky="w")
-        check(v, 3, "Offer a video download for video links copied to the clipboard", "watch_media")
-        ttk.Label(v, style="Sub.TLabel", justify="left", wraplength=S(520), text=self.video_status()).grid(
-            row=4, column=0, columnspan=3, sticky="w", pady=(S(10), S(4)))
-        ub = ttk.Frame(v)
-        ub.grid(row=5, column=0, columnspan=3, sticky="w")
-        upd_btn = ttk.Button(ub, text="Update video engine")
-        upd_btn.pack(side="left")
-        upd_msg = ttk.Label(ub, text="", style="Sub.TLabel", wraplength=S(300), justify="left")
-        upd_msg.pack(side="left", padx=10)
-
-        def update():
-            upd_btn.config(state="disabled")
-            upd_msg.config(text="Downloading...")
-            res = {}
-            threading.Thread(target=lambda: res.setdefault("r", update_engine()), daemon=True).start()
-
-            def poll():
-                if "r" in res:
-                    upd_msg.config(text=res["r"][1])
-                    upd_btn.config(state="normal")
-                elif w.winfo_exists():
-                    w.after(300, poll)
-            poll()
-        upd_btn.config(command=update)
-
-        def ok():
-            try:
-                seg = min(32, max(1, int(vs["segments"].get())))
-                par = min(10, max(1, int(vs["parallel"].get())))
-                lim = max(0, int(vs["limit_kb"].get()))
-            except ValueError:
-                messagebox.showerror("Settings", "Numeric fields must be numbers.")
-                return
-            CFG.update(segments=seg, parallel=par, limit_kb=lim,
-                       folder=vs["folder"].get().strip() or CFG["folder"],
-                       proxy=vs["proxy"].get().strip(), theme=vs["theme"].get().lower(), density=vs["density"].get().lower(),
-                       proxy_mode=next(k for k, x in modes.items() if x == vs["mode"].get()),
-                       subfolders=vs["subfolders"].get(), popup=vs["popup"].get(),
-                       sound=vs["sound"].get(), watch=vs["watch"].get(),
-                       autostart=vs["autostart"].get(), bridge=vs["bridge"].get(),
-                       ytq=vs["ytq"].get(),
-                       cookies="" if vs["cookies"].get() == "none" else vs["cookies"].get(),
-                       watch_media=vs["watch_media"].get(),
-                       clip_mode=next(k for k, x in clips.items() if x == vs["clip_mode"].get()))
-            if WIN and getattr(sys, "frozen", False):
-                set_startup(vs["startup"].get())
-            self.save()
-            self.retheme()
-            self.lst.redraw()
-            w.destroy()
-
-        row = ttk.Frame(outer)
-        row.pack(fill="x", pady=(S(12), 0))
-        ttk.Button(row, text="Save", style="Accent.TButton", command=ok).pack(side="right")
-        ttk.Button(row, text="Cancel", command=w.destroy).pack(side="right", padx=8)
-        self.place_dialog(w)
-
-    def place_dialog(self, w):
-        w.update_idletasks()
-        r = self.root
-        w.geometry(f"+{r.winfo_rootx() + max(0, (r.winfo_width() - w.winfo_reqwidth()) // 2)}"
-                   f"+{r.winfo_rooty() + S(50)}")
-        titlebar(w, P["dark"])
-        w.grab_set()
-
-    # ---- scheduler ----
-    def scheduler(self):
-        s = CFG["sched"]
-        w = tk.Toplevel(self.root)
-        w.title("Scheduler")
-        w.transient(self.root)
-        w.resizable(False, False)
-        w.configure(bg=P["bg"])
-        f = ttk.Frame(w, padding=S(18))
-        f.pack()
-        ttk.Label(f, text="Scheduler", font=(FONT, 13, "bold")).grid(row=0, column=0, columnspan=4,
-                                                                    sticky="w", pady=(0, S(10)))
-        v = {k: tk.BooleanVar(value=s[k]) for k in ("start_on", "stop_on", "daily", "on_finish")}
-        tv = {}
-
-        def time_row(r, label, key, onkey):
-            ttk.Checkbutton(f, text=label, variable=v[onkey]).grid(row=r, column=0, sticky="w", pady=S(5))
-            hh, mm = s[key].split(":")
-            h = tk.StringVar(value=hh)
-            m = tk.StringVar(value=mm)
-            ttk.Spinbox(f, from_=0, to=23, width=3, wrap=True, format="%02.0f",
-                        textvariable=h).grid(row=r, column=1, padx=(S(12), 0))
-            ttk.Label(f, text=":").grid(row=r, column=2)
-            ttk.Spinbox(f, from_=0, to=59, width=3, wrap=True, format="%02.0f",
-                        textvariable=m).grid(row=r, column=3)
-            tv[key] = (h, m)
-
-        time_row(1, "Start downloads at", "start", "start_on")
-        time_row(2, "Stop downloads at", "stop", "stop_on")
-        ttk.Checkbutton(f, text="Repeat every day", variable=v["daily"]).grid(
-            row=3, column=0, columnspan=4, sticky="w", pady=S(5))
-        ttk.Label(f, text="When the stop time arrives, or all\ndownloads finish, do this:").grid(
-            row=4, column=0, columnspan=4, sticky="w", pady=(S(10), S(4)))
-        act = tk.StringVar(value=s["action"])
-        ttk.Combobox(f, textvariable=act, values=ACTIONS, state="readonly", width=30).grid(
-            row=5, column=0, columnspan=4, sticky="w")
-        ttk.Checkbutton(f, text="Also do it when all downloads finish", variable=v["on_finish"]
-                        ).grid(row=6, column=0, columnspan=4, sticky="w", pady=S(8))
-        ttk.Label(f, style="Sub.TLabel", wraplength=S(360), justify="left",
-                  text="MyDM must be running and the PC awake at the start time. Power actions "
-                       "show a 30 second countdown you can cancel.").grid(
-            row=7, column=0, columnspan=4, sticky="w")
-
-        def ok():
-            for k in ("start", "stop"):
-                h, m = tv[k]
-                try:
-                    s[k] = f"{min(23, max(0, int(h.get()))):02d}:{min(59, max(0, int(m.get()))):02d}"
-                except ValueError:
-                    pass
-            for k in v:
-                s[k] = v[k].get()
-            s["action"] = act.get()
-            self.fired.clear()
-            self.save()
-            w.destroy()
-
-        row = ttk.Frame(f)
-        row.grid(row=8, column=0, columnspan=4, sticky="e", pady=(S(16), 0))
-        ttk.Button(row, text="Cancel", command=w.destroy).pack(side="left", padx=6)
-        ttk.Button(row, text="Save", style="Accent.TButton", command=ok).pack(side="left")
-        self.place_dialog(w)
-
-    def sched_summary(self):
-        s, parts = CFG["sched"], []
-        if s["start_on"]:
-            parts.append("start " + s["start"])
-        if s["stop_on"]:
-            parts.append("stop " + s["stop"])
-        if s["action"] != "Do nothing" and (s["stop_on"] or s["on_finish"]):
-            parts.append("then " + s["action"].lower())
-        return ("\u23f0 " + ", ".join(parts)) if parts else ""
-
-    def run_action(self, action, why):
-        if action == "Do nothing":
-            return
-        self.save()
-        if action == "Exit MyDM":
-            self.close()
-        elif action == "Lock screen":
-            cmd = power_cmd(action)
-            cmd and subprocess.Popen(cmd, creationflags=0x08000000 if WIN else 0)
-        else:
-            Countdown(self, action, why)
-
-    def sched_check(self):
-        s = CFG["sched"]
-        n = datetime.now()
-        hm, today = n.strftime("%H:%M"), n.strftime("%Y%m%d")
-        if s["start_on"] and hm == s["start"] and self.fired.get("start") != today:
-            self.fired["start"] = today
-            jobs = [j for j in JOBS if j.status != "Done"]
-            self.start(jobs)
-            self.say(f"Scheduler: started {len(jobs)} download(s)")
-            if not s["daily"]:
-                s["start_on"] = False
-                self.save()
-        if s["stop_on"] and hm == s["stop"] and self.fired.get("stop") != today:
-            self.fired["stop"] = today
-            self.pause_jobs([j for j in JOBS if j.status in RUNNING])
-            self.say("Scheduler: stopped downloads")
-            self.pending = (s["action"], "Scheduled stop time reached")
-            if not s["daily"]:
-                s["stop_on"] = False
-                self.save()
-
-    # ---- main loop ----
-    def tick(self):
-        if self.closing:
-            return
-        now = time.monotonic()
-        self.ticks += 1
-        self.sched_check()
-        while True:
-            try:
-                self.from_browser(self.inbox.get_nowait())
-            except queue.Empty:
-                break
-        active = [j for j in JOBS if j.status in ("Connecting", "Downloading")]
-        for j in JOBS:
-            if j.status == "Waiting" and len(active) < CFG["parallel"]:
-                j.status = "Connecting"
-                j.stop.clear()
-                j.speed, j.hist, j.last = 0.0, [], (now, j.done)
-                self.session.add(j.id)
-                threading.Thread(target=j.run, daemon=True).start()
-                active.append(j)
-                shown = sum(1 for p in self.pops.values() if p.job.status in RUNNING)
-                if CFG["popup"] and shown < 3:
-                    self.open_pop(j)
-
-        if CFG["watch"]:
-            try:
-                t = self.root.clipboard_get()
-            except tk.TclError:
-                t = ""
-            if t and t != self.last_clip:
-                self.last_clip = t
-                urls = self.urls_in(t)
-                known = [u for u in urls if os.path.splitext(urlparse(u).path)[1].lstrip(".").lower() in EXTS]
-                auto = CFG["clip_mode"] == "add"
-                if len(urls) == 1 and known:
-                    if auto:
-                        self.add_many(known, auto=CFG["autostart"])
-                    elif not any(j.url == known[0] for j in JOBS):
-                        BatchDialog(self, known, False)          # ask: add it or not?
-                elif len(urls) == 1 and CFG["watch_media"] and is_media(urls[0]):
-                    self.media_flow(urls[0])                      # opens the quality window
-                elif len(urls) > 1:
-                    if auto:
-                        self.add_many(urls, auto=CFG["autostart"])
-                    else:
-                        BatchDialog(self, urls, False)
-
-        if self.ticks % 10 == 0 and CFG["theme"] == "system" and system_dark() != P["dark"]:
-            self.retheme()
-
-        total_speed = 0.0
-        counts = {k: 0 for k in ["all", "unfinished", "completed"] + ["c:" + c for c in CAT_LIST]}
-        for j in JOBS:
-            d = j.done
-            t0, d0 = j.last
-            if j.status == "Downloading":
-                if now - t0 >= 1:
-                    j.speed, j.last = max(0.0, (d - d0) / (now - t0)), (now, d)
-                    j.hist = (j.hist + [j.speed])[-120:]
-            else:
-                j.speed = 0.0
-            total_speed += j.speed
-            counts["all"] += 1
-            counts["completed" if j.status == "Done" else "unfinished"] += 1
-            counts["c:" + j.cat] += 1
-            if j.status != j.prev:
-                if j.status == "Done" and CFG["sound"]:
-                    try:
-                        import winsound
-                        winsound.MessageBeep()
-                    except Exception:
-                        self.root.bell()
-                j.prev = j.status
-        self.side.set_counts(counts)
-        self.lst.set_jobs([j for j in JOBS if self.match(j)])
-        for jid, p in list(self.pops.items()):
-            try:
-                p.refresh()
-            except tk.TclError:
-                self.pops.pop(jid, None)
-
-        busy = any(j.status in RUNNING for j in JOBS)
-        if not busy and self.session:
-            mine = [j for j in JOBS if j.id in self.session]
-            self.session.clear()
-            s = CFG["sched"]
-            if mine and all(j.status == "Done" for j in mine) and s["on_finish"] \
-                    and s["action"] != "Do nothing":
-                self.pending = (s["action"], "All downloads finished")
-                if not (s["start_on"] or s["stop_on"]):
-                    s["on_finish"] = False
-                    self.save()
-        if self.pending and not busy:
-            act, why = self.pending
-            self.pending = None
-            self.run_action(act, why)
-
-        info = f"{len(active)} active   |   {human(total_speed)}/s   |   {len(JOBS)} item(s)"
-        if time.time() < self.note_until:
-            info += "   -   " + self.note
-        self.status.set(info)
-        self.sched_txt.set(self.sched_summary())
-        if self.ticks % 10 == 0:
-            self.save()
-        self.root.after(500, self.tick)
-
-
-if __name__ == "__main__":
-    try:
-        import ctypes
-        ctypes.windll.shcore.SetProcessDpiAwareness(1)
-    except Exception:
-        pass
-    try:
-        root = BaseTk()
-    except Exception:          # drag-and-drop library failed to load
-        TkinterDnD = None
-        root = tk.Tk()
-    SC = max(1.0, root.winfo_fpixels("1i") / 96)
-    App(root)
-    root.mainloop()
