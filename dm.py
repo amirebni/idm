@@ -46,15 +46,15 @@ CATS = {
 }
 EXT2CAT = {e: c for c, s in CATS.items() for e in s.split()}
 CAT_LIST = list(CATS) + ["Other"]
-CAT_COL = {"Video": "#8b5cf6", "Music": "#ec4899", "Documents": "#3b82f6",
-           "Compressed": "#f59e0b", "Programs": "#10b981", "Images": "#06b6d4",
-           "Other": "#6b7280"}
+CAT_COL = {"Video": "#7286cc", "Music": "#c574a1", "Documents": "#628aca",
+           "Compressed": "#c39953", "Programs": "#4d9b85", "Images": "#57a2af",
+           "Other": "#85919e"}
 EXTS = set(EXT2CAT) | {"torrent", "bin", "img", "m3u8", "mpd"}
 RUNNING = ("Waiting", "Connecting", "Downloading")
 ACTIONS = ["Do nothing", "Exit MyDM", "Lock screen", "Log off", "Sleep", "Hibernate",
            "Restart", "Shut down", "Shut down (force close apps)"]
 WIN = sys.platform.startswith("win")
-VERSION = "2.4"
+VERSION = "2.5"
 EXT_ID = "njeclpgnkpobfkiefclomnolojaacned"          # fixed ID of the bundled browser extension
 PORTS = range(17890, 17900)
 SCHED = {"start_on": False, "start": "02:00", "stop_on": False, "stop": "07:00",
@@ -62,17 +62,18 @@ SCHED = {"start_on": False, "start": "02:00", "stop_on": False, "stop": "07:00",
 CFG = {"folder": str(Path.home() / "Downloads"), "segments": 8, "parallel": 3,
        "limit_kb": 0, "proxy_mode": "system", "proxy": "", "watch": True,
        "autostart": False, "subfolders": True, "popup": True, "sound": False,
-       "theme": "system", "geom": "", "sched": dict(SCHED), "bridge": True,
+       "theme": "system", "density": "compact", "geom": "", "sched": dict(SCHED), "bridge": True,
        "ytq": "1080p", "cookies": "", "watch_media": False, "clip_mode": "ask"}
 JOBS = []
 FONT, SC = "TkDefaultFont", 1.0
 
-LIGHT = dict(dark=False, bg="#f3f4f6", panel="#ffffff", fg="#111827", sub="#6b7280",
-             accent="#2563eb", accent2="#1d4ed8", border="#e0e3e8", sel="#e8f0fe",
-             hdr="#eceff3", hover="#f7f8fa", ok="#15803d", err="#dc2626", bar="#e5e7eb")
-DARK = dict(dark=True, bg="#13151a", panel="#1b1e25", fg="#e5e7eb", sub="#8b93a1",
-            accent="#3b82f6", accent2="#2563eb", border="#2a2f39", sel="#222c42",
-            hdr="#232730", hover="#21252d", ok="#4ade80", err="#f87171", bar="#2c313c")
+# Semantic desktop design tokens, shared by all windows.
+LIGHT = dict(dark=False, bg="#f6f8fa", panel="#ffffff", fg="#202b33", sub="#7b8793",
+             accent="#078b78", accent2="#067565", border="#e7ebef", sel="#e5f5f0",
+             hdr="#f0f3f6", hover="#f8fafb", ok="#078b78", err="#df5661", bar="#edf0f3")
+DARK = dict(dark=True, bg="#15191d", panel="#1d2328", fg="#e8edf0", sub="#93a0aa",
+            accent="#35bfa4", accent2="#26a98f", border="#30383f", sel="#203b36",
+            hdr="#252c32", hover="#242c31", ok="#35bfa4", err="#f47b85", bar="#30383f")
 P = dict(LIGHT)
 
 
@@ -599,6 +600,8 @@ def apply_theme(root):
     st.configure("TFrame", background=P["bg"])
     st.configure("TLabel", background=P["bg"], foreground=P["fg"])
     st.configure("Sub.TLabel", foreground=P["sub"])
+    st.configure("TMenubutton", background=P["panel"], foreground=P["fg"],
+                 padding=(S(11), S(7)), relief="flat", borderwidth=1, **flat)
     st.configure("TButton", background=P["panel"], foreground=P["fg"], padding=(S(11), S(7)),
                  relief="flat", borderwidth=1, width=0, **flat)
     st.map("TButton", background=[("active", P["sel"]), ("disabled", P["bg"])],
@@ -643,7 +646,7 @@ def apply_theme(root):
 
 def make_icon():
     img = tk.PhotoImage(width=64, height=64)
-    img.put("#2563eb", to=(0, 0, 64, 64))
+    img.put(LIGHT["accent"], to=(0, 0, 64, 64))
     img.put("#ffffff", to=(26, 12, 38, 34))
     for i in range(14):
         img.put("#ffffff", to=(18 + i, 32 + i, 46 - i, 33 + i))
@@ -1017,12 +1020,12 @@ class Hint(ttk.Entry):
 
 
 class Side(tk.Canvas):
-    ITEMS = ([("h", "LIBRARY"), ("all", "All downloads"), ("unfinished", "Unfinished"),
+    ITEMS = ([("h", "LIBRARY"), ("all", "All downloads"), ("unfinished", "In progress"),
               ("completed", "Completed"), ("h", "CATEGORIES")] +
              [("c:" + c, c) for c in CAT_LIST])
 
     def __init__(self, parent, on_pick):
-        super().__init__(parent, width=S(210), highlightthickness=0, bd=0)
+        super().__init__(parent, width=S(224), highlightthickness=0, bd=0)
         self.on_pick, self.cur, self.counts, self.rows = on_pick, "all", {}, []
         self.f = tkfont.Font(family=FONT, size=10)
         self.fh = tkfont.Font(family=FONT, size=8, weight="bold")
@@ -1054,9 +1057,9 @@ class Side(tk.Canvas):
                                  font=self.fh)
                 y += S(22)
                 continue
-            h = S(36)
+            h = S(42)
             if key == self.cur:
-                rrect(self, S(2), y, W - S(2), y + h - S(4), S(9), fill=P["sel"], outline="")
+                rrect(self, S(2), y, W - S(2), y + h - S(4), S(6), fill=P["sel"], outline="")
             col = CAT_COL[key[2:]] if key.startswith("c:") else lib[key]
             cy, r = y + (h - S(4)) // 2, S(5)
             self.create_oval(S(16), cy - r, S(16) + 2 * r, cy + r, fill=col, outline="")
@@ -1072,7 +1075,6 @@ class JobList(tk.Canvas):
         super().__init__(parent, highlightthickness=0, bd=0, takefocus=1)
         self.app, self.jobs, self.sel, self.anchor = app, [], set(), None
         self.off, self.hover, self.hits, self.drop, self.sb = 0, None, [], False, None
-        self.RH = S(74)
         self.fn = tkfont.Font(family=FONT, size=10, weight="bold")
         self.fs = tkfont.Font(family=FONT, size=9)
         self.fb = tkfont.Font(family=FONT, size=8, weight="bold")
@@ -1087,6 +1089,10 @@ class JobList(tk.Canvas):
         self.bind("<Delete>", lambda e: app.remove())
         self.bind("<Control-a>", lambda e: self.select_all())
         self.bind("<Control-v>", lambda e: app.paste())
+
+    @property
+    def RH(self):                       # row height follows the "Download list size" setting
+        return S(60) if CFG.get("density", "compact") == "compact" else S(86)
 
     # --- model
     def set_jobs(self, jobs):
@@ -1200,26 +1206,27 @@ class JobList(tk.Canvas):
         return f"{size}  \u00b7  {j.status}"
 
     def pill(self, x0, y0, x1, y1, text, act, jid, accent=False):
-        rrect(self, x0, y0, x1, y1, (y1 - y0) // 2, fill=P["accent"] if accent else P["bar"],
+        rrect(self, x0, y0, x1, y1, S(5), fill=P["sel"] if accent else P["bar"],
               outline="")
         self.create_text((x0 + x1) // 2, (y0 + y1) // 2, text=text, font=self.fs,
-                         fill="#ffffff" if accent else P["fg"])
+                         fill=P["accent"] if accent else P["fg"])
         self.hits.append((x0, y0, x1, y1, act, jid))
 
     def row(self, j, y, W):
         sel, hov = j.id in self.sel, self.hover == j.id
         x0, x1, y0, y1 = S(2), W - S(2), y + S(4), y + self.RH - S(4)
-        rrect(self, x0, y0, x1, y1, S(12),
+        rrect(self, x0, y0, x1, y1, S(6),
               fill=P["sel"] if sel else P["hover"] if hov else P["panel"],
               outline=P["accent"] if sel else P["border"])
-        bs = S(44)
+        cp = CFG.get("density", "compact") == "compact"
+        bs = S(32) if cp else S(44)
         bx, by = x0 + S(14), (y0 + y1) // 2 - bs // 2
-        rrect(self, bx, by, bx + bs, by + bs, S(11), fill=CAT_COL[j.cat], outline="")
+        rrect(self, bx, by, bx + bs, by + bs, S(6), fill=mix(CAT_COL[j.cat], P["panel"], .87), outline="")
         ext = os.path.splitext(j.name)[1].lstrip(".").upper()[:4] or (
             "MP3" if j.mp3 else "AUD" if j.audio else "VID" if j.kind != "file" else "FILE")
-        self.create_text(bx + bs // 2, by + bs // 2, text=ext, fill="#ffffff", font=self.fb)
+        self.create_text(bx + bs // 2, by + bs // 2, text=ext, fill=CAT_COL[j.cat], font=self.fb)
 
-        ph, pw, gap = S(28), S(76), S(8)
+        ph, pw, gap = (S(24), S(66), S(6)) if cp else (S(28), S(76), S(8))
         py = (y0 + y1) // 2 - ph // 2
         right = x1 - S(14)
         st = j.status
@@ -1242,22 +1249,23 @@ class JobList(tk.Canvas):
         known = bool(j.total) or st == "Done"
         pw_txt = S(54)
         if known:
-            self.create_text(left - S(14), y0 + S(18), anchor="e", font=self.fp,
+            self.create_text(left - S(14), y0 + (S(13) if cp else S(18)), anchor="e", font=self.fp,
                              text=f"{pct}%", fill=P["ok"] if st == "Done" else P["fg"])
         avail = left - S(14) - pw_txt - tx
-        self.create_text(tx, y0 + S(18), anchor="w", font=self.fn, fill=P["fg"],
+        self.create_text(tx, y0 + (S(13) if cp else S(18)), anchor="w", font=self.fn, fill=P["fg"],
                          text=fit(j.name, self.fn, avail))
         err = st.startswith("Error")
-        self.create_text(tx, y0 + S(38), anchor="w", font=self.fs,
+        self.create_text(tx, y0 + (S(29) if cp else S(38)), anchor="w", font=self.fs,
                          fill=P["err"] if err else P["sub"],
                          text=fit(self.sub(j), self.fs, left - S(14) - tx))
-        by0, bx1 = y1 - S(15), left - S(14)
-        rrect(self, tx, by0, bx1, by0 + S(6), S(3), fill=P["bar"], outline="")
+        bh = S(4) if cp else S(6)
+        by0, bx1 = y1 - (S(9) if cp else S(15)), left - S(14)
+        rrect(self, tx, by0, bx1, by0 + bh, S(2), fill=P["bar"], outline="")
         w = int((bx1 - tx) * pct / 100)
         if w > S(6):
             col = (P["ok"] if st == "Done" else P["err"] if err else
                    P["accent"] if st in RUNNING else P["sub"])
-            rrect(self, tx, by0, tx + w, by0 + S(6), S(3), fill=col, outline="")
+            rrect(self, tx, by0, tx + w, by0 + bh, S(2), fill=col, outline="")
 
     def redraw(self):
         self.delete("all")
@@ -1661,7 +1669,7 @@ class App:
         self.last_clip, self.note, self.note_until, self.ticks = "", "", 0, 0
         self.load()
         root.title("MyDM " + VERSION)
-        root.geometry(CFG["geom"] or f"{S(1160)}x{S(700)}")
+        root.geometry(CFG["geom"] or f"{S(1220)}x{S(780)}")
         root.minsize(S(940), S(520))
         init_fonts(root)
         apply_theme(root)
@@ -1672,27 +1680,38 @@ class App:
         except tk.TclError:
             pass
 
-        hdr = ttk.Frame(root, padding=(S(16), S(14), S(16), S(8)))
+        hdr = ttk.Frame(root, padding=(S(24), S(22), S(24), S(16)))
         hdr.pack(fill="x")
         self.logo = self.icon.subsample(2, 2)
         ttk.Label(hdr, image=self.logo).pack(side="left")
-        ttk.Label(hdr, text="MyDM", font=(FONT, 15, "bold")).pack(side="left", padx=(S(8), S(4)))
+        ttk.Label(hdr, text="MyDM", font=(FONT, 19, "bold")).pack(side="left", padx=(S(8), S(4)))
         ttk.Label(hdr, text="v" + VERSION, style="Sub.TLabel").pack(side="left", padx=(0, S(14)))
-        self.entry = Hint(hdr, "Paste or drop a link here, then press Enter")
+        self.entry = Hint(hdr, "Paste a download link")
         self.entry.pack(side="left", fill="x", expand=True)
         self.entry.bind("<Return>", lambda e: self.add())
-        ttk.Button(hdr, text="\uff0b  Add", style="Accent.TButton", command=self.add).pack(
+        ttk.Button(hdr, text="+  Add download", style="Accent.TButton", command=self.add).pack(
             side="left", padx=(S(8), 0))
 
-        tb = ttk.Frame(root, padding=(S(16), 0, S(16), S(10)))
+        tb = ttk.Frame(root, padding=(S(24), 0, S(24), S(18)))
         tb.pack(fill="x")
-        for t, c in [("\u25b6  Start", self.start), ("\u275a\u275a  Pause", self.pause),
-                     ("\u2715  Remove", self.remove), ("Clear done", self.clear),
-                     ("Paste", self.paste), ("Import", self.imp), ("Export", self.exp)]:
-            ttk.Button(tb, text=t, command=c).pack(side="left", padx=(0, S(6)))
-        ttk.Button(tb, text="\u2699  Settings", command=self.settings).pack(side="right")
-        ttk.Button(tb, text="\u23f0  Scheduler", command=self.scheduler).pack(
-            side="right", padx=(0, S(6)))
+        for t, c in [("▶  Start", self.start), ("Ⅱ  Pause", self.pause),
+                     ("▶▶  Start all", lambda: self.start(JOBS)),
+                     ("■  Stop all", lambda: self.pause_jobs(JOBS)),
+                     ("×  Remove", self.remove),
+                     ("Delete file", lambda: self.remove(True))]:
+            ttk.Button(tb, text=t, command=c).pack(side="left", padx=(0, S(8)))
+        ttk.Separator(tb, orient="vertical").pack(side="left", fill="y", padx=S(8))
+        tools = tk.Menu(root, tearoff=0)
+        for label, cmd in [("Paste links", self.paste), ("Import downloads…", self.imp),
+                           ("Export downloads…", self.exp), (None, None),
+                           ("Show progress window", self.show_pop),
+                           ("Clear completed downloads", self.clear)]:
+            tools.add_separator() if label is None else tools.add_command(label=label, command=cmd)
+        ttk.Menubutton(tb, text="More", menu=tools, width=7).pack(side="left")
+        self.tools_menu = tools
+        ttk.Button(tb, text="⚙  Settings", command=self.settings).pack(side="right")
+        ttk.Button(tb, text="◷  Scheduler", command=self.scheduler).pack(
+            side="right", padx=(0, S(8)))
 
         foot = ttk.Frame(root, padding=(S(16), S(4), S(16), S(10)))
         foot.pack(side="bottom", fill="x")
@@ -1700,10 +1719,10 @@ class App:
         ttk.Label(foot, textvariable=self.status, style="Sub.TLabel").pack(side="left")
         ttk.Label(foot, textvariable=self.sched_txt, style="Sub.TLabel").pack(side="right")
 
-        body = ttk.Frame(root, padding=(S(16), 0))
+        body = ttk.Frame(root, padding=(S(24), 0))
         body.pack(fill="both", expand=True)
         self.side = Side(body, self.set_filter)
-        self.side.pack(side="left", fill="y", padx=(0, S(10)))
+        self.side.pack(side="left", fill="y", padx=(0, S(20)))
         right = ttk.Frame(body)
         right.pack(side="left", fill="both", expand=True)
         self.lst = JobList(right, self)
@@ -1747,6 +1766,8 @@ class App:
         apply_theme(self.root)
         self.menu.configure(bg=P["panel"], fg=P["fg"], activebackground=P["accent"],
                             activeforeground="#ffffff", bd=0, relief="flat")
+        self.tools_menu.configure(bg=P["panel"], fg=P["fg"], activebackground=P["sel"],
+                                  activeforeground=P["accent"], bd=0, relief="flat")
         self.entry.restyle()
         titlebar(self.root, P["dark"])
         self.side.redraw()
@@ -2155,6 +2176,8 @@ class App:
         check(g, 2, "Show a progress window when a download starts", "popup")
         check(g, 3, "Play a sound when a download completes", "sound")
         combo(g, 4, "Theme", "theme", ["System", "Light", "Dark"], CFG["theme"].capitalize(), 12)
+        combo(g, 6, "Download list size", "density", ["Compact", "Comfortable"],
+              CFG.get("density", "compact").capitalize(), 12)
         vs["startup"] = tk.BooleanVar(value=False)
         if WIN and getattr(sys, "frozen", False):
             ttk.Checkbutton(g, text="Start MyDM with Windows (needed for scheduled downloads)",
@@ -2233,7 +2256,7 @@ class App:
                 return
             CFG.update(segments=seg, parallel=par, limit_kb=lim,
                        folder=vs["folder"].get().strip() or CFG["folder"],
-                       proxy=vs["proxy"].get().strip(), theme=vs["theme"].get().lower(),
+                       proxy=vs["proxy"].get().strip(), theme=vs["theme"].get().lower(), density=vs["density"].get().lower(),
                        proxy_mode=next(k for k, x in modes.items() if x == vs["mode"].get()),
                        subfolders=vs["subfolders"].get(), popup=vs["popup"].get(),
                        sound=vs["sound"].get(), watch=vs["watch"].get(),
@@ -2246,6 +2269,7 @@ class App:
                 set_startup(vs["startup"].get())
             self.save()
             self.retheme()
+            self.lst.redraw()
             w.destroy()
 
         row = ttk.Frame(outer)
