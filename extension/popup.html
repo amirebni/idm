@@ -1,25 +1,27 @@
 <!doctype html>
 <html><head><meta charset="utf-8">
 <style>
-  :root{color-scheme:dark}
-  body{width:350px;margin:0;font:13px/1.4 "Segoe UI",Tahoma,Arial,sans-serif;background:#13151a;color:#e5e7eb}
-  header{display:flex;align-items:center;gap:10px;padding:14px 16px;border-bottom:1px solid #2a2f39}
-  .logo{width:30px;height:30px;border-radius:9px;background:#2563eb;display:grid;place-items:center}
-  h1{font-size:15px;margin:0;flex:1}
-  .st{font-size:12px;display:flex;align-items:center;gap:6px;opacity:.9}
-  .dot{width:9px;height:9px;border-radius:50%;background:#6b7280}
-  .dot.on{background:#4ade80}.dot.off{background:#f87171}
-  section{padding:12px 16px;border-bottom:1px solid #2a2f39}
-  h2{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#8b93a1;margin:0 0 8px}
-  .item{display:flex;align-items:center;gap:10px;padding:8px 10px;margin-bottom:6px;border-radius:10px;background:#1b1e25}
+  :root{color-scheme:light;--bg:#f6f8fa;--surface:#fff;--fg:#202b33;--muted:#7b8793;--accent:#2f6df0;--border:#e7ebef;--good:#2f6df0;--error:#df5661;--on-accent:#fff}
+  *{box-sizing:border-box;letter-spacing:0}
+  body{width:370px;margin:0;font:13px/1.6 "Segoe UI",Tahoma,Arial,sans-serif;background:var(--bg);color:var(--fg)}
+  header{display:flex;align-items:center;gap:12px;padding:20px;border-bottom:1px solid var(--border);background:var(--surface)}
+  .logo{width:36px;height:36px;border-radius:7px;background:var(--accent);display:grid;place-items:center}
+  h1{font-size:19px;margin:0;flex:1;font-weight:650}
+  .st{font-size:12px;display:flex;align-items:center;gap:6px;color:var(--muted)}
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--muted)}
+  .dot.on{background:var(--good)}.dot.off{background:var(--error)}
+  section{padding:18px 20px;border-bottom:1px solid var(--border)}
+  h2{font-size:11px;text-transform:uppercase;color:var(--muted);margin:0 0 12px}
+  .item{display:flex;align-items:center;gap:12px;padding:12px;margin-bottom:8px;border:1px solid var(--border);border-radius:6px;background:var(--surface)}
   .item .n{flex:1;min-width:0}.item .n b{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:600}
-  .item .n small{color:#8b93a1}
-  button{font:inherit;border:0;border-radius:8px;padding:6px 12px;cursor:pointer;color:#fff;background:#2563eb}
-  button:hover{filter:brightness(1.15)}
-  .empty{color:#8b93a1;font-size:12px}
-  label{display:flex;align-items:center;gap:8px;margin:6px 0}
-  select{background:#1b1e25;color:#e5e7eb;border:1px solid #2a2f39;border-radius:6px;padding:3px 6px;font:inherit}
-  .msg{font-size:12px;color:#4ade80;min-height:16px;margin-top:4px}
+  .item .n small,.empty{color:var(--muted);font-size:12px}
+  button{font:inherit;border:0;border-radius:5px;padding:7px 12px;cursor:pointer;color:var(--on-accent);background:var(--accent)}
+  button:hover{filter:brightness(.92)}
+  button:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+  label{display:flex;align-items:center;gap:10px;margin:12px 0}
+  input{accent-color:var(--accent)}
+  select{background:var(--surface);color:var(--fg);border:1px solid var(--border);border-radius:5px;padding:5px 8px;font:inherit}
+  .msg{font-size:12px;color:var(--good);min-height:16px;margin-top:4px}
 </style></head>
 <body dir="auto">
 <header>
