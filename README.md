@@ -1,4 +1,4 @@
-# MyDM 2.7
+# MyDM 2.8
 
 Personal IDM-style download manager for Windows (Python/tkinter) with a Chrome/Edge extension.
 
@@ -16,7 +16,7 @@ python dm.py
 ```
 
 ## Build the Windows installer
-Push the repository to GitHub. `.github/workflows/build.yml` builds `MyDM_Setup_v2.7.exe` and the extension artifact.
+Push the repository to GitHub. `.github/workflows/build.yml` builds `MyDM_Setup_v2.8.exe` and the extension artifact.
 
 ## Install the extension
 Open `chrome://extensions`, enable Developer mode, choose Load unpacked and select the `extension` folder (or Reload it after an update).

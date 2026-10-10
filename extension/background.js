@@ -1,4 +1,4 @@
-// MyDM Downloader 2.7 - background service worker
+// MyDM Downloader 2.8 - background service worker
 const PORTS = [17890, 17891, 17892, 17893, 17894, 17895, 17896, 17897, 17898, 17899];
 const MEDIA_EXT = new Set(["mp4", "m4v", "webm", "mkv", "mov", "avi", "flv", "wmv",
   "mp3", "m4a", "aac", "ogg", "oga", "opus", "wav", "flac"]);
@@ -108,6 +108,22 @@ async function supports(url) {
   return v;
 }
 
+// the login cookies of the video site, so MyDM's video engine can pass "confirm you're not a bot"
+async function cookieList(url) {
+  const out = new Map();
+  const add = (cs) => { for (const c of cs) out.set(c.domain + "|" + c.path + "|" + c.name,
+    { d: c.domain, p: c.path, s: c.secure, e: c.expirationDate || 0, n: c.name, v: c.value }); };
+  try {
+    const host = new URL(url).hostname;
+    if (/(^|\.)(youtube\.com|youtu\.be|google\.com|googlevideo\.com)$/.test(host)) {
+      for (const d of ["youtube.com", "google.com"]) add(await chrome.cookies.getAll({ domain: d }));
+    } else {
+      add(await chrome.cookies.getAll({ domain: host.split(".").slice(-2).join(".") }));
+    }
+  } catch (e) { /* no cookies */ }
+  return [...out.values()].slice(0, 500);
+}
+
 async function sendToApp(m) {
   const app = await findApp();
   if (!app) return { ok: false, error: "not-running" };
@@ -122,7 +138,8 @@ async function sendToApp(m) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ url: m.url, referer: m.referer || "", cookie, ua: navigator.userAgent,
                              name: m.name || "", action: m.action || "start", kind: m.kind || "file",
-                             urls: m.urls || [] }),
+                             urls: m.urls || [],
+                             cookiejar: ["site", "link", "links"].includes(m.kind) ? await cookieList(m.cookieUrl || m.url) : [] }),
     });
     return { ok: r.ok, error: r.ok ? "" : "refused" };
   } catch (e) { return { ok: false, error: "failed" }; }

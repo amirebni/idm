@@ -54,7 +54,7 @@ RUNNING = ("Waiting", "Connecting", "Downloading")
 ACTIONS = ["Do nothing", "Exit MyDM", "Lock screen", "Log off", "Sleep", "Hibernate",
            "Restart", "Shut down", "Shut down (force close apps)"]
 WIN = sys.platform.startswith("win")
-VERSION = "2.7"
+VERSION = "2.8"
 EXT_ID = "njeclpgnkpobfkiefclomnolojaacned"          # fixed ID of the bundled browser extension
 PORTS = range(17890, 17900)
 SCHED = {"start_on": False, "start": "02:00", "stop_on": False, "stop": "07:00",
@@ -63,7 +63,8 @@ CFG = {"folder": str(Path.home() / "Downloads"), "segments": 8, "parallel": 3,
        "limit_kb": 0, "proxy_mode": "system", "proxy": "", "watch": True,
        "autostart": False, "subfolders": True, "popup": True, "sound": False,
        "theme": "system", "density": "compact", "geom": "", "sched": dict(SCHED), "bridge": True,
-       "ytq": "1080p", "cookies": "", "watch_media": False, "clip_mode": "ask"}
+       "ytq": "1080p", "cookies": "", "cookiefile": "", "ipv4": True, "watch_media": False,
+       "clip_mode": "ask"}
 JOBS = []
 FONT, SC = "TkDefaultFont", 1.0
 
@@ -257,6 +258,31 @@ def http_proxy():
     return p if "://" in p else "http://" + p
 
 
+def ext_cookie_path():
+    return str(DATA / "ext-cookies.txt")
+
+
+def save_ext_cookies(items):
+    """The extension sends the cookies of the video site you are logged in to; write them in the
+    Netscape cookies.txt format so yt-dlp can use them (this is what fixes "confirm you're not a bot")."""
+    if not items:
+        return
+    try:
+        DATA.mkdir(exist_ok=True)
+        far = int(time.time()) + 7 * 86400
+        lines = ["# Netscape HTTP Cookie File"]
+        for c in items:
+            dom = c["d"]
+            lines.append("\t".join([dom, "TRUE" if dom.startswith(".") else "FALSE", c["p"] or "/",
+                                    "TRUE" if c["s"] else "FALSE", str(int(c["e"]) or far),
+                                    c["n"], c["v"]]))
+        tmp = DATA / "ext-cookies.tmp"
+        tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        os.replace(tmp, ext_cookie_path())
+    except Exception:
+        pass
+
+
 def ydl_opts(**extra):
     o = {"quiet": True, "no_warnings": True, "noplaylist": True, "windowsfilenames": True,
          "socket_timeout": 30, "retries": 5, "fragment_retries": 5}
@@ -272,8 +298,15 @@ def ydl_opts(**extra):
     elif mode == "manual" and CFG["proxy"].strip():
         p = CFG["proxy"].strip()
         o["proxy"] = p if "://" in p else "http://" + p
-    if CFG["cookies"]:
+    cf = CFG["cookiefile"].strip().strip('"')
+    if cf and os.path.isfile(cf):                      # 1) a cookies.txt the user picked
+        o["cookiefile"] = cf
+    elif CFG["cookies"]:                               # 2) read straight from a browser
         o["cookiesfrombrowser"] = (CFG["cookies"],)
+    elif os.path.isfile(ext_cookie_path()):            # 3) cookies sent by the browser extension
+        o["cookiefile"] = ext_cookie_path()
+    if CFG["ipv4"]:                                    # a VPN's IPv6 address is often flagged by YouTube
+        o["source_address"] = "0.0.0.0"
     o.update(extra)
     return o
 
@@ -470,7 +503,7 @@ def start_bridge(inbox):
                 return self.reply(403)
             try:
                 n = int(self.headers.get("Content-Length") or 0)
-                if n > 200000:
+                if n > 1500000:
                     return self.reply(413)
                 d = json.loads(self.rfile.read(n))
                 m = {k: re.sub(r"[\r\n]+", " ", str(d.get(k) or ""))[:4000]
@@ -478,6 +511,16 @@ def start_bridge(inbox):
                 ls = d.get("urls") if isinstance(d.get("urls"), list) else []
                 m["urls"] = [re.sub(r"\s+", "", str(x))[:2000] for x in ls[:300]
                              if str(x).startswith(("http://", "https://"))]
+                cj = d.get("cookiejar") if isinstance(d.get("cookiejar"), list) else []
+                m["cookiejar"] = []
+                for c in cj[:500]:
+                    try:
+                        z = lambda k: re.sub(r"[\t\r\n]", "", str(c.get(k) or ""))[:3000]
+                        if z("d") and z("n"):
+                            m["cookiejar"].append({"d": z("d"), "p": z("p") or "/", "n": z("n"), "v": z("v"),
+                                                   "s": bool(c.get("s")), "e": float(c.get("e") or 0)})
+                    except Exception:
+                        pass
                 if not m["url"] and m["urls"]:
                     m["url"] = m["urls"][0]
                 if not m["url"].startswith(("http://", "https://")):
@@ -1835,7 +1878,10 @@ class FetchDialog(tk.Toplevel):
         msg = re.sub(r"\x1b\[[0-9;]*m", "", self.res["err"]).strip()[:350]
         low = msg.lower()
         if "sign in" in low or "bot" in low:
-            msg += "\n\nTip: Settings > Browser cookies > Firefox (while logged in to the site)."
+            msg += ("\n\nHow to fix:\n1) Update the extension, log in to YouTube in Chrome, then press "
+                    "Download on the video page (the extension sends your login to MyDM).\n"
+                    "2) Or Settings > Video > Browser cookies > firefox (while logged in), or pick a cookies.txt file.\n"
+                    "3) With a VPN, try a different server and keep 'Force IPv4' on.")
         elif any(k in low for k in ("getaddrinfo", "timed out", "connection", "proxy", "unreachable")):
             msg += "\n\nTip: if the site is blocked, turn on your VPN / set the proxy in Settings."
         messagebox.showerror("Could not read this video", msg)
@@ -2276,6 +2322,7 @@ class App:
 
     def from_browser(self, m):
         url, kind = m["url"], m.get("kind") or "file"
+        save_ext_cookies(m.get("cookiejar"))
         if kind == "site":                       # a page the video engine understands (YouTube, Aparat...)
             self.root.deiconify()
             self.media_flow(url)
@@ -2583,13 +2630,21 @@ class App:
               CFG["ytq"], 14)
         combo(v, 1, "Browser cookies", "cookies", ["none", "firefox", "edge", "chrome", "brave"],
               CFG["cookies"] or "none", 14)
-        ttk.Label(v, style="Sub.TLabel", text="Needed when a site says \"sign in to confirm you're not a bot\".").grid(
-            row=2, column=1, sticky="w")
-        check(v, 3, "Offer a video download for video links copied to the clipboard", "watch_media")
+        field(v, 2, "Cookies file (cookies.txt)", "cookiefile", 30)
+        ttk.Button(v, text="...", width=3, command=lambda: vs["cookiefile"].set(
+            filedialog.askopenfilename(filetypes=[("Cookies", "*.txt"), ("All", "*.*")])
+            or vs["cookiefile"].get())).grid(row=2, column=2, padx=(S(6), 0))
+        ttk.Label(v, style="Sub.TLabel", wraplength=S(520), justify="left", text=(
+            "Needed when YouTube says \"sign in to confirm you're not a bot\". Easiest: log in to YouTube in "
+            "Chrome with the MyDM extension - it sends your login automatically. Chrome/Edge cookies cannot "
+            "be read directly (use Firefox or a cookies.txt file).")).grid(
+            row=3, column=0, columnspan=3, sticky="w", pady=(0, S(4)))
+        check(v, 4, "Force IPv4 for video sites (recommended with a VPN)", "ipv4")
+        check(v, 5, "Offer a video download for video links copied to the clipboard", "watch_media")
         ttk.Label(v, style="Sub.TLabel", justify="left", wraplength=S(520), text=self.video_status()).grid(
-            row=4, column=0, columnspan=3, sticky="w", pady=(S(10), S(4)))
+            row=6, column=0, columnspan=3, sticky="w", pady=(S(10), S(4)))
         ub = ttk.Frame(v)
-        ub.grid(row=5, column=0, columnspan=3, sticky="w")
+        ub.grid(row=7, column=0, columnspan=3, sticky="w")
         upd_btn = ttk.Button(ub, text="Update video engine")
         upd_btn.pack(side="left")
         upd_msg = ttk.Label(ub, text="", style="Sub.TLabel", wraplength=S(300), justify="left")
@@ -2627,7 +2682,8 @@ class App:
                        autostart=vs["autostart"].get(), bridge=vs["bridge"].get(),
                        ytq=vs["ytq"].get(),
                        cookies="" if vs["cookies"].get() == "none" else vs["cookies"].get(),
-                       watch_media=vs["watch_media"].get(),
+                       watch_media=vs["watch_media"].get(), ipv4=vs["ipv4"].get(),
+                       cookiefile=vs["cookiefile"].get().strip().strip('"'),
                        clip_mode=next(k for k, x in clips.items() if x == vs["clip_mode"].get()))
             if WIN and getattr(sys, "frozen", False):
                 set_startup(vs["startup"].get())
