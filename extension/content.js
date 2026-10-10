@@ -1,4 +1,4 @@
-// MyDM Downloader 2.5 - content script
+// MyDM Downloader 2.7 - content script
 (() => {
   if (window.__mydmLoaded) return;
   window.__mydmLoaded = true;
@@ -25,7 +25,7 @@
       box-shadow:0 10px 30px rgba(0,0,0,.4);animation:in .25s ease-out}
     @keyframes in{from{opacity:0;transform:translateY(-10px)}to{opacity:1;transform:none}}
     @keyframes shrink{from{width:100%}to{width:0}}
-    .logo{flex:none;width:32px;height:32px;border-radius:9px;background:#078b78;display:grid;place-items:center}
+    .logo{flex:none;width:32px;height:32px;border-radius:9px;background:#2f6df0;display:grid;place-items:center}
     .txt{flex:1;min-width:0}
     .t1{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
     .t2{opacity:.65;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -33,10 +33,10 @@
     button{font:inherit;border:0;border-radius:9px;padding:7px 15px;cursor:pointer;color:#fff;
       background:rgba(255,255,255,.13);flex:none}
     button:hover{filter:brightness(1.2)}
-    button.pri{background:#078b78;font-weight:600}
+    button.pri{background:#2f6df0;font-weight:600}
     .x{padding:3px 8px;background:transparent;opacity:.6;font-size:18px;line-height:1}
     .never{background:none;padding:0;font-size:11px;opacity:.55;text-decoration:underline;display:block;margin-top:2px}
-    .prog{position:absolute;bottom:0;left:0;height:3px;width:100%;background:#35bfa4;
+    .prog{position:absolute;bottom:0;left:0;height:3px;width:100%;background:#4c8dff;
       animation:shrink 15s linear forwards}
     .bar:hover .prog{animation-play-state:paused}`;
   const ICON = '<svg width="18" height="18" viewBox="0 0 24 24" fill="#fff"><path d="M10.5 3h3v8h4.2L12 17.2 6.3 11h4.2z"/><rect x="5" y="19" width="14" height="2" rx="1"/></svg>';

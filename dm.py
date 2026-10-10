@@ -54,7 +54,7 @@ RUNNING = ("Waiting", "Connecting", "Downloading")
 ACTIONS = ["Do nothing", "Exit MyDM", "Lock screen", "Log off", "Sleep", "Hibernate",
            "Restart", "Shut down", "Shut down (force close apps)"]
 WIN = sys.platform.startswith("win")
-VERSION = "2.6"
+VERSION = "2.7"
 EXT_ID = "njeclpgnkpobfkiefclomnolojaacned"          # fixed ID of the bundled browser extension
 PORTS = range(17890, 17900)
 SCHED = {"start_on": False, "start": "02:00", "stop_on": False, "stop": "07:00",
@@ -988,6 +988,38 @@ class Job:
 
 
 # ================================================================== widgets
+class Hint(ttk.Entry):
+    def __init__(self, parent, hint):
+        super().__init__(parent)
+        self.hint, self.empty = hint, False
+        self.bind("<FocusIn>", self._in)
+        self.bind("<FocusOut>", self._out)
+        self._out()
+
+    def _in(self, _=None):
+        if self.empty:
+            self.delete(0, "end")
+            self.empty = False
+        self.restyle()
+
+    def _out(self, _=None):
+        if not self.get():
+            self.empty = True
+            self.insert(0, self.hint)
+        self.restyle()
+
+    def restyle(self):
+        self.configure(foreground=P["sub"] if self.empty else P["fg"])
+
+    def value(self):
+        return "" if self.empty else self.get()
+
+    def clear(self):
+        self.delete(0, "end")
+        self.empty = False
+        self._out()
+
+
 def glyph(c, kind, cx, cy, s, col, w=None):
     """Small line icons drawn straight on a canvas. (cx, cy) = centre, s = size in pixels."""
     h = s / 2

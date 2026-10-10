@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "MyDM Downloader",
-  "version": "2.6.0",
+  "version": "2.7.0",
   "description": "Offers to download the videos and music you play in the browser (files, HLS/DASH streams, YouTube and more) with MyDM.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAyMHLP2P2hKuJQXRErlrCezfLJ7cELoiRHISIeMPod0DKzBu1BTCBjRoF1reCtfjScy7cundI+P/i6fLE1LF6K8kj3ZgP4dd63Nw+ZxapQyomOpJCzvzF8fqqZzwDW7EvZrYqc4kSR+bBjNglg/zFplmjYsAtYDRPHz+SY4uCiEkuaWejq06DOACNLG0uCIiCQQar7gb9lZg2nCTGrrjYiRKXF4wa+2jH254F/b1h+pDKPvozskJNwZEkfvc8XiLzdxF5rRPUlVNXMCiBi8Z4UGkKu3vH/6ZITqT0hTASPeSE+hQ56X65D+iPAADhV3lqT7Xzd1GDWkev8otkbm1+rwIDAQAB",
   "minimum_chrome_version": "110",
