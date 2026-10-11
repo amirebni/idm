@@ -54,7 +54,7 @@ RUNNING = ("Waiting", "Connecting", "Downloading")
 ACTIONS = ["Do nothing", "Exit MyDM", "Lock screen", "Log off", "Sleep", "Hibernate",
            "Restart", "Shut down", "Shut down (force close apps)"]
 WIN = sys.platform.startswith("win")
-VERSION = "2.8"
+VERSION = "2.9"
 EXT_ID = "njeclpgnkpobfkiefclomnolojaacned"          # fixed ID of the bundled browser extension
 PORTS = range(17890, 17900)
 SCHED = {"start_on": False, "start": "02:00", "stop_on": False, "stop": "07:00",
@@ -64,7 +64,7 @@ CFG = {"folder": str(Path.home() / "Downloads"), "segments": 8, "parallel": 3,
        "autostart": False, "subfolders": True, "popup": True, "sound": False,
        "theme": "system", "density": "compact", "geom": "", "sched": dict(SCHED), "bridge": True,
        "ytq": "1080p", "cookies": "", "cookiefile": "", "ipv4": True, "watch_media": False,
-       "clip_mode": "ask"}
+       "clip_mode": "ask", "colw": {}, "side_w": 214, "wins": {}}
 JOBS = []
 FONT, SC = "TkDefaultFont", 1.0
 
@@ -1154,6 +1154,38 @@ def glyph(c, kind, cx, cy, s, col, w=None):
         L(cx + .1 * h, cy + .1 * h, cx + .75 * h, cy + .75 * h)
 
 
+def keep_size(win, key, minw=360, minh=240):
+    """Let a window be resized by the user, and remember its size for next time."""
+    win.resizable(True, True)
+    win.update_idletasks()
+    win.minsize(min(S(minw), win.winfo_reqwidth()), min(S(minh), win.winfo_reqheight()))
+    sz = (CFG.get("wins") or {}).get(key)
+    if isinstance(sz, list) and len(sz) == 2:
+        try:
+            win.geometry(f"{max(int(sz[0]), S(minw) // 2)}x{max(int(sz[1]), S(minh) // 2)}")
+        except (ValueError, tk.TclError):
+            pass
+
+    def mem(e):
+        if e.widget is win and e.width > 80 and e.height > 80:
+            CFG.setdefault("wins", {})[key] = [e.width, e.height]
+    win.bind("<Configure>", mem, add="+")
+
+
+class Splitter(tk.Canvas):
+    """Thin draggable bar between the sidebar and the list."""
+    def __init__(self, parent, on_start, on_drag):
+        super().__init__(parent, width=S(7), highlightthickness=0, bd=0, cursor="sb_h_double_arrow")
+        self.bind("<ButtonPress-1>", on_start)
+        self.bind("<B1-Motion>", on_drag)
+        self.bind("<Configure>", lambda e: self.restyle())
+
+    def restyle(self):
+        self.delete("all")
+        self.configure(bg=P["bg"])
+        self.create_line(S(3), 0, S(3), self.winfo_height(), fill=P["border"])
+
+
 class MenuBar(tk.Frame):
     def __init__(self, parent, items, on_theme):
         super().__init__(parent, bd=0, highlightthickness=0)
@@ -1359,13 +1391,15 @@ class JobList(tk.Canvas):
     def __init__(self, parent, app):
         super().__init__(parent, highlightthickness=0, bd=0, takefocus=1)
         self.app, self.jobs, self.sel, self.anchor = app, [], set(), None
-        self.off, self.hover, self.drop, self.sb = 0, None, False, None
+        self.off, self.hover, self.drop, self.sb, self.drag = 0, None, False, None, None
         self.fn = tkfont.Font(family=FONT, size=10)
         self.fs = tkfont.Font(family=FONT, size=9)
         self.fh = tkfont.Font(family=FONT, size=8, weight="bold")
         self.bind("<Configure>", lambda e: self.redraw())
         self.bind("<Button-1>", self.click)
         self.bind("<Double-1>", self.double)
+        self.bind("<B1-Motion>", lambda e: self.drag and self.edge_move(e))
+        self.bind("<ButtonRelease-1>", lambda e: setattr(self, "drag", None))
         for b in ("<Button-3>", "<Button-2>"):
             self.bind(b, self.rclick)
         self.bind("<Motion>", self.motion)
@@ -1423,6 +1457,8 @@ class JobList(tk.Canvas):
 
     def click(self, e):
         self.focus_set()
+        if self.edge_press(e):
+            return
         i = self.idx_at(e.y)
         if i is None:
             self.sel.clear()
@@ -1460,6 +1496,7 @@ class JobList(tk.Canvas):
             self.app.dbl(self.jobs[i])
 
     def motion(self, e):
+        self.configure(cursor="sb_h_double_arrow" if self.edge_at(e) else "")
         i = self.idx_at(e.y)
         self.set_hover(self.jobs[i].id if i is not None else None)
 
@@ -1469,14 +1506,44 @@ class JobList(tk.Canvas):
             self.redraw()
 
     # --- drawing
+    DEFW = dict(size=96, status=224, left=88, rate=104, date=84)
+    ORDER = ("size", "status", "left", "rate", "date")
+
+    def cw(self, k):
+        try:
+            v = float((CFG.get("colw") or {}).get(k, self.DEFW[k]))
+        except (TypeError, ValueError):
+            v = self.DEFW[k]
+        return S(min(520, max(50, v)))
+
     def cols(self, W):
-        pad = S(8)
-        d = W - pad - S(84)
-        r = d - S(104)
-        l = r - S(88)
-        s = l - S(224)
-        z = s - S(96)
-        return dict(name=S(18), size=z, status=s, left=l, rate=r, date=d)
+        x, X = W - S(8), {"name": S(18)}
+        for k in reversed(self.ORDER):
+            x -= self.cw(k)
+            X[k] = x
+        return X
+
+    def edge_at(self, e):
+        """Which column's left edge is the mouse on (in the header)? Drag it to resize that column."""
+        if e.y >= self.HH:
+            return None
+        X = self.cols(self.winfo_width())
+        return next((k for k in self.ORDER if abs(e.x - X[k]) <= S(4)), None)
+
+    def edge_press(self, e):
+        k = self.edge_at(e)
+        if k:
+            self.drag = (k, e.x, self.cw(k))
+        return bool(k)
+
+    def edge_move(self, e):
+        k, x0, w0 = self.drag
+        W = self.winfo_width()
+        others = sum(self.cw(o) for o in self.ORDER if o != k)
+        room = W - S(8) - S(200) - others                 # keep the file-name column readable
+        w = max(S(50), min(S(520), room, w0 + (x0 - e.x)))
+        CFG.setdefault("colw", {})[k] = round(w / SC)
+        self.redraw()
 
     def stripes(self, x0, x1, y0, y1, col):
         per, h = S(10), y1 - y0
@@ -1503,8 +1570,9 @@ class JobList(tk.Canvas):
                          text=fit(j.name, self.fn, X["size"] - X["name"] - S(46)))
         d, t, st = j.done, j.total, j.status
         self.create_text(X["size"], cy, anchor="w", font=self.fs, fill=P["fg"],
-                         text=human(t or d) if (t or d) else "—")
-        sx, bw, bh = X["status"], S(104), S(6)
+                         text=fit(human(t or d) if (t or d) else "—", self.fs, self.cw("size") - S(8)))
+        sx, ws, bh = X["status"], self.cw("status"), S(6)
+        bw = max(S(30), ws - S(120))
         err, run = st.startswith("Error"), st in RUNNING
         if st == "Done":
             glyph(self, "check", sx + S(8), cy, S(15), P["ok"], 1)
@@ -1522,7 +1590,7 @@ class JobList(tk.Canvas):
                 if run:
                     self.stripes(sx + S(2), sx + w - S(2), by0 + 1, by0 + bh - 1, mix(col, "#ffffff", .3))
             if j.note and st == "Downloading":
-                txt = fit(j.note, self.fs, S(88))
+                txt = fit(j.note, self.fs, min(S(88), ws - S(40)))
             elif err:
                 txt = "Error"
             elif st == "Downloading":
@@ -1531,14 +1599,14 @@ class JobList(tk.Canvas):
                 txt = "Queued"
             else:
                 txt = st if st != "Connecting" else "Connecting"
-            self.create_text(sx + S(198), cy, anchor="e", text=txt, font=self.fs,
+            self.create_text(sx + ws - S(26), cy, anchor="e", text=txt, font=self.fs,
                              fill=P["fg"] if run else P["err"] if err else P["sub"])
         left = fmt_eta((t - d) / j.speed) if st == "Downloading" and j.speed > 1 and t else "—"
         rate = f"{human(j.speed)}/s" if st == "Downloading" and j.speed else "—"
-        self.create_text(X["left"], cy, anchor="w", text=left, font=self.fs, fill=P["sub"] if left == "—" else P["fg"])
-        self.create_text(X["rate"], cy, anchor="w", text=rate, font=self.fs, fill=P["sub"] if rate == "—" else P["fg"])
-        self.create_text(X["date"], cy, anchor="w", font=self.fs, fill=P["sub"],
-                         text=time.strftime("%b %d", time.localtime(j.added)) if j.added else "")
+        for k, txt in (("left", left), ("rate", rate),
+                       ("date", time.strftime("%b %d", time.localtime(j.added)) if j.added else "")):
+            self.create_text(X[k], cy, anchor="w", font=self.fs, fill=P["fg"] if k != "date" and txt != "—" else P["sub"],
+                             text=fit(txt, self.fs, self.cw(k) - S(8)))
 
     def redraw(self):
         self.delete("all")
@@ -1570,6 +1638,57 @@ class JobList(tk.Canvas):
             self.sb.set(self.off / T, min(1.0, (self.off + V) / T))
 
 
+class LinkDialog(tk.Toplevel):
+    """Give a half-finished download a new link (for sites whose links expire)."""
+    def __init__(self, app, job):
+        super().__init__(app.root)
+        self.app, self.job = app, job
+        self.title("Change link")
+        self.configure(bg=P["bg"])
+        self.transient(app.root)
+        f = ttk.Frame(self, padding=S(18))
+        f.pack(fill="both", expand=True)
+        ttk.Label(f, text=job.name, font=(FONT, 12, "bold")).pack(anchor="w")
+        pct = f"{job.done * 100 / job.total:.1f}%" if job.total else human(job.done)
+        ttk.Label(f, style="Sub.TLabel", wraplength=S(520), justify="left", text=(
+            f"Downloaded so far: {pct}. Paste the new link below. If the new link points to the same file "
+            "(same size) the download continues from where it stopped; otherwise it starts again.")).pack(
+            anchor="w", pady=(2, S(12)))
+        ttk.Label(f, text="New link").pack(anchor="w")
+        self.e = ttk.Entry(f, width=72)
+        self.e.pack(fill="x", pady=(2, S(10)))
+        self.e.insert(0, job.url)
+        ttk.Label(f, text="Referer (optional - some sites only accept the link from their own page)").pack(anchor="w")
+        self.r = ttk.Entry(f, width=72)
+        self.r.pack(fill="x", pady=(2, 0))
+        self.r.insert(0, job.referer)
+        row = ttk.Frame(f)
+        row.pack(fill="x", pady=(S(16), 0))
+        ttk.Button(row, text="Save and resume", style="Accent.TButton",
+                   command=lambda: self.go(True)).pack(side="right")
+        ttk.Button(row, text="Save", command=lambda: self.go(False)).pack(side="right", padx=8)
+        ttk.Button(row, text="Cancel", command=self.destroy).pack(side="right")
+        self.bind("<Escape>", lambda e: self.destroy())
+        self.e.bind("<Return>", lambda e: self.go(True))
+        self.update_idletasks()
+        r = app.root
+        self.geometry(f"+{r.winfo_rootx() + max(0, (r.winfo_width() - self.winfo_reqwidth()) // 2)}"
+                      f"+{r.winfo_rooty() + S(110)}")
+        titlebar(self, P["dark"])
+        keep_size(self, "link", 420, 200)
+        self.e.focus_set()
+        self.e.select_range(0, "end")
+
+    def go(self, resume):
+        url = self.e.get().strip()
+        if not url.startswith(("http://", "https://")):
+            messagebox.showerror("Change link", "The link must start with http:// or https://", parent=self)
+            return
+        ref = self.r.get().strip()
+        self.destroy()
+        self.app.change_link(self.job, url, ref, resume)
+
+
 class AddDialog(tk.Toplevel):
     def __init__(self, app):
         super().__init__(app.root)
@@ -1577,7 +1696,6 @@ class AddDialog(tk.Toplevel):
         self.title("Add URL")
         self.configure(bg=P["bg"])
         self.transient(app.root)
-        self.resizable(False, False)
         f = ttk.Frame(self, padding=S(18))
         f.pack(fill="both", expand=True)
         ttk.Label(f, text="Add download links", font=(FONT, 12, "bold")).pack(anchor="w")
@@ -1602,6 +1720,7 @@ class AddDialog(tk.Toplevel):
         self.geometry(f"+{r.winfo_rootx() + max(0, (r.winfo_width() - self.winfo_reqwidth()) // 2)}"
                       f"+{r.winfo_rooty() + S(110)}")
         titlebar(self, P["dark"])
+        keep_size(self, "add", 420, 260)
         self.t.focus_set()
 
     def go(self):
@@ -1614,7 +1733,6 @@ class Pop(tk.Toplevel):
     def __init__(self, app, job):
         super().__init__(app.root)
         self.app, self.job, self.mode = app, job, None
-        self.resizable(False, False)
         self.configure(bg=P["bg"])
         self.protocol("WM_DELETE_WINDOW", self.hide)
         W = S(500)
@@ -1654,6 +1772,7 @@ class Pop(tk.Toplevel):
         y = r.winfo_rooty() + max(0, (r.winfo_height() - self.winfo_reqheight()) // 4) + S(28) * n
         self.geometry(f"+{x}+{y}")
         titlebar(self, P["dark"])
+        keep_size(self, "pop", 420, 420)
         self.attributes("-topmost", True)
         self.after(400, self.untop)
 
@@ -1799,6 +1918,7 @@ class BatchDialog(tk.Toplevel):
         self.geometry(f"+{r.winfo_rootx() + max(0, (r.winfo_width() - self.winfo_reqwidth()) // 2)}"
                       f"+{r.winfo_rooty() + S(70)}")
         titlebar(self, P["dark"])
+        keep_size(self, "batch", 480, 320)
         self.attributes("-topmost", True)
         self.after(400, lambda: self.attributes("-topmost", False))
 
@@ -1905,17 +2025,20 @@ class MediaDialog(tk.Toplevel):
         ttk.Label(f, text="Choose quality", font=(FONT, 10, "bold")).pack(anchor="w", pady=(0, S(4)))
         self.tv = ttk.Treeview(f, columns=("detail", "size"), show="tree headings",
                                selectmode="browse", height=min(len(opts), 9))
-        for c, t, w in (("#0", "Quality", 150), ("detail", "Format", 170), ("size", "Size", 110)):
+        for c, t, w in (("#0", "Quality", 150), ("detail", "Format", 170), ("size", "Approx. size", 120)):
             self.tv.heading(c, text=t, anchor="w")
             self.tv.column(c, width=S(w), stretch=c == "#0")
         for i, o in enumerate(opts):
             self.tv.insert("", "end", iid=str(i), text="  " + o["label"], values=(
-                o["detail"], ("~" + human(o["size"])) if o["size"] else "-"))
-        self.tv.pack(fill="x")
+                o["detail"], ("\u2248 " + human(o["size"])) if o["size"] else "-"))
+        self.tv.pack(fill="both", expand=True)
         i = str(pick_default(opts))
         self.tv.selection_set(i)
         self.tv.focus(i)
         self.tv.bind("<Double-1>", lambda e: self.go(True))
+        ttk.Label(f, style="Sub.TLabel", wraplength=S(520), text=(
+            "\u2248 = estimated size. The finished file can differ a little from this number.")).pack(
+            anchor="w", pady=(S(8), 0))
         if not ffmpeg_path():
             ttk.Label(f, style="Sub.TLabel", wraplength=S(520),
                       text="ffmpeg was not found, so only ready-made files (up to 720p) are offered."
@@ -1931,6 +2054,7 @@ class MediaDialog(tk.Toplevel):
         self.geometry(f"+{r.winfo_rootx() + max(0, (r.winfo_width() - self.winfo_reqwidth()) // 2)}"
                       f"+{r.winfo_rooty() + S(70)}")
         titlebar(self, P["dark"])
+        keep_size(self, "media", 480, 300)
         self.attributes("-topmost", True)
         self.after(400, lambda: self.attributes("-topmost", False))
 
@@ -2026,6 +2150,8 @@ class App:
             m.add_separator()
             for lab, key in (("Compact", "compact"), ("Comfortable", "comfortable")):
                 m.add_command(label="List size: " + lab, command=lambda k=key: self.set_density(k))
+            m.add_separator()
+            m.add_command(label="Reset layout (columns, sidebar, windows)", command=self.reset_layout)
             self.menus.append(m)
             return m
 
@@ -2040,7 +2166,8 @@ class App:
         downs = menu([("Resume", lambda: self.start(self.selected())),
                       ("Stop", lambda: self.pause_jobs(self.selected())), ("Stop all", stop_running), None,
                       ("Start queue", lambda: self.start(JOBS)), ("Stop queue", stop_queued), None,
-                      ("Download again", self.redo), ("Remove from list", self.remove),
+                      ("Change link...", self.edit_link), ("Download again", self.redo),
+                      ("Remove from list", self.remove),
                       ("Remove and delete file", lambda: self.remove(True)), None,
                       ("Clear completed downloads", self.clear)])
         helpm = menu([("Open extension folder", lambda: open_path(ext_dir())),
@@ -2082,8 +2209,10 @@ class App:
         body.pack(fill="both", expand=True)
         self.body = body
         self.side = Side(body, self.set_filter)
+        self.side.configure(width=S(CFG.get("side_w", 214)))
         self.side.pack(side="left", fill="y")
-        line(body, side="left", fill="y")
+        self.split = Splitter(body, self.side_start, self.side_drag)
+        self.split.pack(side="left", fill="y")
         right = tk.Frame(body, bd=0, highlightthickness=0)
         right.pack(side="left", fill="both", expand=True)
         self.lst = JobList(right, self)
@@ -2100,6 +2229,7 @@ class App:
         for label, cmd in [("Start / Resume", self.start), ("Pause", self.pause), (None, None),
                            ("Open file", self.open_file), ("Open folder", self.openf),
                            ("Show progress window", self.show_pop), ("Copy link", self.copy_link),
+                           ("Change link...", self.edit_link),
                            (None, None), ("Download again", self.redo), ("Remove from list", self.remove),
                            ("Remove and delete file", lambda: self.remove(True))]:
             self.menu.add_separator() if not label else self.menu.add_command(
@@ -2136,6 +2266,7 @@ class App:
         for l in self.flbls:
             l.configure(bg=P["bg"], fg=P["sub"])
         self.menubar.restyle()
+        self.split.restyle()
         self.search.restyle()
         titlebar(self.root, P["dark"])
         self.tb.redraw()
@@ -2151,6 +2282,44 @@ class App:
 
     def toggle_theme(self):
         self.set_theme("light" if P["dark"] else "dark")
+
+    def side_start(self, e):
+        self._sw = (e.x_root, self.side.winfo_width())
+
+    def side_drag(self, e):
+        w = max(S(150), min(S(420), self._sw[1] + e.x_root - self._sw[0]))
+        CFG["side_w"] = round(w / SC)
+        self.side.configure(width=w)
+
+    def reset_layout(self):
+        CFG["colw"], CFG["side_w"], CFG["wins"] = {}, 214, {}
+        self.side.configure(width=S(214))
+        self.lst.redraw()
+        self.save()
+        self.say("Layout reset (window sizes apply the next time they open)")
+
+    def edit_link(self):
+        s = self.selected()
+        if not s:
+            self.say("Select a download first")
+        elif s[0].status == "Done":
+            self.say("This download is already finished")
+        elif s[0].status in ("Connecting", "Downloading"):
+            messagebox.showinfo("Change link", "Stop this download first, then change its link.")
+        else:
+            LinkDialog(self, s[0])
+
+    def change_link(self, j, url, referer, resume):
+        if j.status in ("Connecting", "Downloading"):
+            return
+        j.url, j.referer, j.err = url, referer, None
+        if j.status == "Waiting" or j.status.startswith("Error"):
+            j.status = "Paused"
+        j.prev = j.status
+        self.save()
+        self.say("Link updated: " + j.name)
+        if resume:
+            self.start([j])
 
     def set_density(self, d):
         CFG["density"] = d
@@ -2550,12 +2719,11 @@ class App:
         w = tk.Toplevel(self.root)
         w.title("Settings")
         w.transient(self.root)
-        w.resizable(False, False)
         w.configure(bg=P["bg"])
         outer = ttk.Frame(w, padding=(S(16), S(14), S(16), S(14)))
-        outer.pack()
+        outer.pack(fill="both", expand=True)
         nb = ttk.Notebook(outer)
-        nb.pack()
+        nb.pack(fill="both", expand=True)
         vs = {}
 
         def page(title):
@@ -2696,14 +2864,16 @@ class App:
         row.pack(fill="x", pady=(S(12), 0))
         ttk.Button(row, text="Save", style="Accent.TButton", command=ok).pack(side="right")
         ttk.Button(row, text="Cancel", command=w.destroy).pack(side="right", padx=8)
-        self.place_dialog(w)
+        self.place_dialog(w, "settings")
 
-    def place_dialog(self, w):
+    def place_dialog(self, w, key=None):
         w.update_idletasks()
         r = self.root
         w.geometry(f"+{r.winfo_rootx() + max(0, (r.winfo_width() - w.winfo_reqwidth()) // 2)}"
                    f"+{r.winfo_rooty() + S(50)}")
         titlebar(w, P["dark"])
+        if key:
+            keep_size(w, key, 380, 260)
         w.grab_set()
 
     # ---- scheduler ----
@@ -2712,10 +2882,9 @@ class App:
         w = tk.Toplevel(self.root)
         w.title("Scheduler")
         w.transient(self.root)
-        w.resizable(False, False)
         w.configure(bg=P["bg"])
         f = ttk.Frame(w, padding=S(18))
-        f.pack()
+        f.pack(fill="both", expand=True)
         ttk.Label(f, text="Scheduler", font=(FONT, 13, "bold")).grid(row=0, column=0, columnspan=4,
                                                                     sticky="w", pady=(0, S(10)))
         v = {k: tk.BooleanVar(value=s[k]) for k in ("start_on", "stop_on", "daily", "on_finish")}
@@ -2767,7 +2936,7 @@ class App:
         row.grid(row=8, column=0, columnspan=4, sticky="e", pady=(S(16), 0))
         ttk.Button(row, text="Cancel", command=w.destroy).pack(side="left", padx=6)
         ttk.Button(row, text="Save", style="Accent.TButton", command=ok).pack(side="left")
-        self.place_dialog(w)
+        self.place_dialog(w, "sched")
 
     def sched_summary(self):
         s, parts = CFG["sched"], []
