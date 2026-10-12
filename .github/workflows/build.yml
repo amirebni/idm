@@ -1,9 +1,13 @@
 name: build
 on:
   push:
+    tags: ["v*"]
+    branches: ["**"]
   workflow_dispatch:
   schedule:
     - cron: "0 3 * * 1"
+permissions:
+  contents: write
 jobs:
   build:
     runs-on: windows-latest
@@ -27,9 +31,20 @@ jobs:
       - run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss'
       - uses: actions/upload-artifact@v4
         with:
-          name: MyDM-Setup-v2.9
-          path: Output/MyDM_Setup_v2.9.exe
+          name: MyDM-Setup-v3.0
+          path: Output/*.exe
       - uses: actions/upload-artifact@v4
         with:
-          name: MyDM-Extension-v2.9
+          name: MyDM-Extension-v3.0
           path: extension
+      - name: Zip extension
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: Compress-Archive -Path extension\* -DestinationPath MyDM_Extension.zip
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            Output/*.exe
+            MyDM_Extension.zip
