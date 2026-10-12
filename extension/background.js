@@ -1,4 +1,4 @@
-// MyDM Downloader 2.9 - background service worker
+// MyDM Downloader 3.0 - background service worker
 const PORTS = [17890, 17891, 17892, 17893, 17894, 17895, 17896, 17897, 17898, 17899];
 const MEDIA_EXT = new Set(["mp4", "m4v", "webm", "mkv", "mov", "avi", "flv", "wmv",
   "mp3", "m4a", "aac", "ogg", "oga", "opus", "wav", "flac"]);

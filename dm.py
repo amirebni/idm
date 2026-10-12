@@ -1,4 +1,4 @@
-import os, re, sys, json, math, time, queue, shutil, mimetypes, threading, subprocess
+import os, re, webbrowser, sys, json, math, time, queue, shutil, mimetypes, threading, subprocess
 import tkinter as tk
 import tkinter.font as tkfont
 from concurrent.futures import ThreadPoolExecutor
@@ -54,7 +54,9 @@ RUNNING = ("Waiting", "Connecting", "Downloading")
 ACTIONS = ["Do nothing", "Exit MyDM", "Lock screen", "Log off", "Sleep", "Hibernate",
            "Restart", "Shut down", "Shut down (force close apps)"]
 WIN = sys.platform.startswith("win")
-VERSION = "2.9"
+VERSION = "3.0"
+REPO = "amirebni/idm"
+REPO_URL = "https://github.com/" + REPO
 EXT_ID = "njeclpgnkpobfkiefclomnolojaacned"          # fixed ID of the bundled browser extension
 PORTS = range(17890, 17900)
 SCHED = {"start_on": False, "start": "02:00", "stop_on": False, "stop": "07:00",
@@ -144,6 +146,28 @@ def http_get(url, **kw):
     r = s.get(url, **kw)
     r._sess = s
     return r
+
+
+def vtuple(v):
+    return tuple(int(x) for x in re.findall(r"\d+", v)[:3]) or (0,)
+
+
+def check_update():
+    """Ask GitHub for the latest release. Returns (ok, message, url)."""
+    try:
+        r = http_get(f"https://api.github.com/repos/{REPO}/releases/latest", timeout=15,
+                     headers={"Accept": "application/vnd.github+json", "User-Agent": "MyDM"})
+        if r.status_code == 404:
+            return False, "No release has been published on GitHub yet.", REPO_URL + "/releases"
+        r.raise_for_status()
+        d = r.json()
+        tag = d.get("tag_name") or ""
+        url = d.get("html_url") or REPO_URL + "/releases"
+        if vtuple(tag) > vtuple(VERSION):
+            return True, f"New version available: {tag.lstrip('vV')} (you have {VERSION}).", url
+        return False, f"You have the latest version ({VERSION}).", url
+    except Exception as e:
+        return False, f"Could not check for updates: {str(e)[:120]}", REPO_URL + "/releases"
 
 
 def system_proxy():
@@ -2173,7 +2197,7 @@ class App:
         helpm = menu([("Open extension folder", lambda: open_path(ext_dir())),
                       ("Open Chrome extensions page", open_chrome_ext),
                       ("Update video engine", self.update_engine_bg), None,
-                      ("About MyDM", self.about)])
+                      ("Check for updates", lambda: self.settings("About")), ("About MyDM", self.about)])
         self.menubar = MenuBar(root, [("Tasks", tasks), ("File", files), ("Downloads", downs),
                                       ("View", theme_menu()), ("Help", helpm)], self.toggle_theme)
         self.menubar.pack(fill="x")
@@ -2327,7 +2351,7 @@ class App:
         self.lst.redraw()
 
     def about(self):
-        messagebox.showinfo("About MyDM", f"MyDM {VERSION}\n\n" + self.video_status())
+        self.settings("About")
 
     def update_engine_bg(self):
         self.say("Updating the video engine...")
@@ -2715,7 +2739,7 @@ class App:
         return (f"Video engine (yt-dlp): {v}\nffmpeg: {'ok' if ffmpeg_path() else 'missing'}     "
                 f"JS engine: {'ok' if js else 'missing (YouTube may fail)'}")
 
-    def settings(self):
+    def settings(self, tab=None):
         w = tk.Toplevel(self.root)
         w.title("Settings")
         w.transient(self.root)
@@ -2832,6 +2856,52 @@ class App:
                     w.after(300, poll)
             poll()
         upd_btn.config(command=update)
+
+        ab = page("About")
+        ttk.Label(ab, text=f"MyDM {VERSION}", font=(FONT, 15, "bold")).grid(row=0, column=0, columnspan=3, sticky="w")
+        ttk.Label(ab, style="Sub.TLabel", wraplength=S(520), justify="left", text=(
+            "A personal download manager for Windows with a Chrome/Edge extension. Multi-segment downloads "
+            "with resume, speed limit and proxy, scheduler with power actions, YouTube/Aparat/Varzesh3 through "
+            "yt-dlp, HLS/DASH streams through ffmpeg, clipboard watcher and right-click download.")).grid(
+            row=1, column=0, columnspan=3, sticky="w", pady=(S(6), S(10)))
+        ttk.Label(ab, text="Project page and updates").grid(row=2, column=0, columnspan=3, sticky="w")
+        ttk.Label(ab, text=REPO_URL, foreground=P["accent"], cursor="hand2").grid(
+            row=3, column=0, columnspan=3, sticky="w")
+        ab.grid_slaves(row=3)[0].bind("<Button-1>", lambda e: webbrowser.open(REPO_URL))
+        ar = ttk.Frame(ab)
+        ar.grid(row=4, column=0, columnspan=3, sticky="w", pady=(S(10), 0))
+        up_btn = ttk.Button(ar, text="Check for updates")
+        up_btn.pack(side="left")
+        ttk.Button(ar, text="Open GitHub", command=lambda: webbrowser.open(REPO_URL)).pack(side="left", padx=6)
+        up_msg = ttk.Label(ab, text="", style="Sub.TLabel", wraplength=S(520), justify="left")
+        up_msg.grid(row=5, column=0, columnspan=3, sticky="w", pady=(S(8), 0))
+        up_dl = ttk.Button(ab, text="Open download page")
+
+        def check():
+            up_btn.config(state="disabled")
+            up_dl.grid_forget()
+            up_msg.config(text="Checking...")
+            res = {}
+            threading.Thread(target=lambda: res.setdefault("r", check_update()), daemon=True).start()
+
+            def poll():
+                if "r" in res:
+                    new, msg, url = res["r"]
+                    up_msg.config(text=msg)
+                    up_btn.config(state="normal")
+                    if new:
+                        up_dl.config(command=lambda: webbrowser.open(url))
+                        up_dl.grid(row=6, column=0, sticky="w", pady=(S(6), 0))
+                elif w.winfo_exists():
+                    w.after(300, poll)
+            poll()
+        up_btn.config(command=check)
+        ttk.Label(ab, style="Sub.TLabel", wraplength=S(520), justify="left", text=self.video_status()).grid(
+            row=7, column=0, columnspan=3, sticky="w", pady=(S(14), 0))
+        ttk.Label(ab, style="Sub.TLabel", text="Data folder: " + str(DATA)).grid(
+            row=8, column=0, columnspan=3, sticky="w", pady=(S(4), 0))
+        if tab == "About":
+            nb.select(ab)
 
         def ok():
             try:

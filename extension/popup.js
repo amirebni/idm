@@ -1,4 +1,4 @@
-// MyDM Downloader 2.9 - toolbar popup
+// MyDM Downloader 3.0 - toolbar popup
 const T = {
   fa: { found: "یافت‌شده در این صفحه", none: "هنوز ویدیو یا موسیقی‌ای پخش نشده است. یکی را پخش کنید.",
         set: "تنظیمات", enabled: "نمایش نوار دانلود هنگام پخش", block: "برای این سایت نشان نده", lang: "زبان",
