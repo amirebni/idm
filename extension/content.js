@@ -1,4 +1,4 @@
-// MyDM Downloader 3.0 - content script
+// MyDM Downloader 3.2 - content script
 (() => {
   if (window.__mydmLoaded) return;
   window.__mydmLoaded = true;
@@ -7,26 +7,34 @@
     fa: { dir: "rtl", video: "می‌خواهید این ویدیو را دانلود کنید؟", audio: "می‌خواهید این موسیقی را دانلود کنید؟",
           dl: "دانلود", later: "بعداً", never: "برای این سایت نشان نده", sent: "به MyDM ارسال شد ✓",
           sentSite: "در MyDM باز شد؛ کیفیت را آنجا انتخاب کنید ✓",
-          fail: "برنامهٔ MyDM باز نیست.", browser: "دانلود با مرورگر",
-          noengine: "موتور ویدیویی MyDM بارگذاری نشده است (در MyDM: تنظیمات ← Video را ببینید)." },
+          fail: "برنامهٔ MyDM باز نیست.", unpaired: "MyDM اجازهٔ اتصال را نداد. در برنامه پنجرهٔ اجازه را تأیید کنید و دوباره امتحان کنید.", browser: "دانلود با مرورگر",
+          noengine: "موتور ویدیویی MyDM بارگذاری نشده است (در MyDM: تنظیمات ← Video را ببینید).",
+          loading: "در حال خواندن کیفیت‌ها…", pick: "کیفیت را انتخاب کنید", openapp: "باز کردن در MyDM",
+          bot: "یوتیوب ورود می‌خواهد: در همین مرورگر وارد یوتیوب شوید و دوباره امتحان کنید.", approx: "حجم‌ها تقریبی‌اند" },
     en: { dir: "ltr", video: "Download this video?", audio: "Download this music?",
           dl: "Download", later: "Not now", never: "Don't ask on this site", sent: "Sent to MyDM ✓",
           sentSite: "Opened in MyDM - choose the quality there ✓",
-          fail: "MyDM is not running.", browser: "Download with browser",
-          noengine: "MyDM's video engine did not load (see Settings > Video in MyDM)." },
+          fail: "MyDM is not running.", unpaired: "MyDM did not allow the connection. Approve the window in the app and try again.", browser: "Download with browser",
+          noengine: "MyDM's video engine did not load (see Settings > Video in MyDM).",
+          loading: "Reading the qualities...", pick: "Choose a quality", openapp: "Open in MyDM",
+          bot: "YouTube wants you signed in: log in to YouTube in this browser and try again.", approx: "Sizes are approximate" },
   };
   const SKIP = new Set(["m3u8", "mpd", "ts", "m4s"]);
   const VIDEO_HOSTS = /(^|\.)(youtube\.com|youtu\.be|aparat\.com|vimeo\.com|dailymotion\.com|instagram\.com|tiktok\.com|twitch\.tv)$/;
   const CSS = `
     *{box-sizing:border-box}
-    .bar{position:fixed;z-index:2147483647;display:flex;align-items:center;gap:12px;padding:9px 12px;
+    .bar{flex-wrap:wrap;position:fixed;z-index:2147483647;display:flex;align-items:center;gap:12px;padding:9px 12px;
       border-radius:14px;font:14px/1.35 "Segoe UI",Tahoma,Arial,sans-serif;color:#fff;overflow:hidden;
       background:rgba(20,24,31,.95);border:1px solid rgba(255,255,255,.14);
       box-shadow:0 10px 30px rgba(0,0,0,.4);animation:in .25s ease-out}
     @keyframes in{from{opacity:0;transform:translateY(-10px)}to{opacity:1;transform:none}}
     @keyframes shrink{from{width:100%}to{width:0}}
     .logo{flex:none;width:32px;height:32px;border-radius:9px;background:#2f6df0;display:grid;place-items:center}
-    .txt{flex:1;min-width:0}
+    .txt{flex:1 1 0;min-width:0}
+    .qs{flex:0 0 100%;display:flex;flex-wrap:wrap;gap:7px;padding-top:4px;max-height:40vh;overflow:auto}
+    .qs button{display:flex;flex-direction:column;align-items:center;gap:1px;min-width:92px;padding:6px 12px;line-height:1.3}
+    .qs small{opacity:.7;font-size:11px;font-weight:400}
+    .note{flex:0 0 100%;opacity:.55;font-size:11px}
     .t1{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
     .t2{opacity:.65;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
     .ok{color:#4ade80;font-weight:600}.err{color:#f87171}
@@ -64,8 +72,8 @@
       const r = await chrome.runtime.sendMessage({ type: "supports", url: location.href });
       if (r && r.site) return offer(el, { url: location.href, media, mode: "site", ext: "", size: 0 });
       // a video site, but MyDM or its video engine is not available: say so instead of staying silent
-      if (r && VIDEO_HOSTS.test(location.hostname) && (!r.app || !r.engine)) {
-        return offer(el, { url: location.href, media, mode: "msg", msg: r.app ? "noengine" : "fail", ext: "", size: 0 });
+      if (r && VIDEO_HOSTS.test(location.hostname) && (!r.app || !r.engine || r.paired === false)) {
+        return offer(el, { url: location.href, media, mode: "msg", msg: r.paired === false ? "unpaired" : r.app ? "noengine" : "fail", ext: "", size: 0 });
       }
     } catch (e) { /* extension reloaded */ }
     for (let i = 0; i < 6; i++) {
@@ -135,7 +143,8 @@
       $(".t1").className = "t1 err"; $(".t1").textContent = t[c.msg]; $(".t2").textContent = "";
       acts.append(mk("", t.later, close));
     } else {
-      acts.append(mk("pri", t.dl, send), mk("", t.later, close));
+      acts.append(mk("pri", t.dl, () => (c.mode === "site" || c.mode === "stream" ? choose() : send(-1))),
+                  mk("", t.later, close));
       $(".txt").appendChild(nv);
     }
     $(".x").onclick = close;
@@ -144,7 +153,8 @@
 
     let alive = true, raf = 0, timer = setTimeout(close, 15000);
     bar.addEventListener("mouseenter", () => clearTimeout(timer));
-    bar.addEventListener("mouseleave", () => { timer = setTimeout(close, 6000); });
+    let busy = false;
+    bar.addEventListener("mouseleave", () => { if (!busy) timer = setTimeout(close, 6000); });
     function place() {
       if (!alive) return;
       const r = el.getBoundingClientRect();
@@ -160,22 +170,61 @@
     function close() { alive = false; clearTimeout(timer); cancelAnimationFrame(raf); host.remove(); if (closeCurrent === close) closeCurrent = null; }
     closeCurrent = close;
 
-    async function send() {
-      clearTimeout(timer);
+    // video pages and streams: show the qualities (with sizes) here, then send only the chosen one
+    async function choose() {
+      clearTimeout(timer); busy = true;
       bar.querySelector(".prog").remove();
+      acts.textContent = ""; nv.remove();
+      const t1 = $(".t1");
+      t1.className = "t1"; t1.textContent = t.loading;
+      let r = null;
+      try { r = await chrome.runtime.sendMessage({ type: "formats", url: c.url, referer: location.href, kind: c.mode }); }
+      catch (e) { /* extension reloaded */ }
+      if (!bar.isConnected) return;
+      if (!r || r.error === "app") return send(-1);
+      if (r.error === "fail" || r.error === "engine") {
+        t1.className = "t1 err"; t1.textContent = r.bot ? t.bot : r.error === "engine" ? t.noengine : t.fail;
+        if (r.msg && !r.bot) $(".t2").textContent = r.msg.slice(0, 160);
+        acts.append(mk("pri", t.openapp, () => send(-1)), mk("", t.later, close));
+        return;
+      }
+      if (!r.opts || !r.opts.length) return send(-1);   // nothing to choose (single quality / playlist): the app decides
+      t1.textContent = t.pick;
+      const qs = document.createElement("div");
+      qs.className = "qs";
+      r.opts.forEach((o, i) => {
+        const b = document.createElement("button");
+        if (i === r.default) b.className = "pri";
+        const l = document.createElement("span"); l.textContent = o.label;
+        const s = document.createElement("small");
+        s.textContent = [o.detail, o.size ? "\u2248 " + fmtSize(o.size) : ""].filter(Boolean).join("  \u00b7  ");
+        b.append(l, s);
+        b.onclick = () => { qs.remove(); note.remove(); send(i); };
+        qs.appendChild(b);
+      });
+      const note = document.createElement("div");
+      note.className = "note"; note.textContent = t.approx;
+      bar.append(qs, note);
+      acts.append(mk("", t.later, close));
+    }
+
+    async function send(pick = -1) {
+      clearTimeout(timer);
+      const pg = bar.querySelector(".prog");
+      if (pg) pg.remove();
       acts.textContent = "";
       nv.remove();
       let res = null;
       try {
         res = await chrome.runtime.sendMessage({ type: "download", url: c.url, referer: location.href,
-                                                  name, action: "start", kind: c.mode });
+                                                  name, action: "start", kind: c.mode, pick });
       } catch (e) { /* extension reloaded */ }
       const t1 = $(".t1");
       if (res && res.ok) {
-        t1.className = "t1 ok"; t1.textContent = c.mode === "site" ? t.sentSite : t.sent;
+        t1.className = "t1 ok"; t1.textContent = c.mode === "site" && pick < 0 ? t.sentSite : t.sent;
         setTimeout(close, 3000);
       } else {
-        t1.className = "t1 err"; t1.textContent = t.fail;
+        t1.className = "t1 err"; t1.textContent = res && res.error === "not-paired" ? t.unpaired : t.fail;
         acts.append(mk("pri", t.browser, () => {
           chrome.runtime.sendMessage({ type: "browserDownload", url: c.url });
           close();

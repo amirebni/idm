@@ -1,9 +1,9 @@
 [Setup]
 AppName=MyDM
-AppVersion=3.0
+AppVersion=3.2
 DefaultDirName={autopf}\MyDM
 DefaultGroupName=MyDM
-OutputBaseFilename=MyDM_Setup_v3.0
+OutputBaseFilename=MyDM_Setup_v3.2
 Compression=lzma2
 SolidCompression=yes
 

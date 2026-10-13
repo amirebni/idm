@@ -1,4 +1,4 @@
-// MyDM Downloader 3.0 - background service worker
+// MyDM Downloader 3.2 - background service worker
 const PORTS = [17890, 17891, 17892, 17893, 17894, 17895, 17896, 17897, 17898, 17899];
 const MEDIA_EXT = new Set(["mp4", "m4v", "webm", "mkv", "mov", "avi", "flv", "wmv",
   "mp3", "m4a", "aac", "ogg", "oga", "opus", "wav", "flac"]);
@@ -82,9 +82,36 @@ async function findApp() {
       const j = await r.json();
       if (j.app === "MyDM") {
         await chrome.storage.session.set({ port: p });
-        return { port: p, version: j.version, engine: !!j.engine };
+        return { port: p, version: j.version, engine: !!j.engine, cookies: j.cookies !== false };
       }
     } catch (e) { /* try the next port */ }
+  }
+  return null;
+}
+
+// The app only accepts requests that carry a token. The first time (or after "Reset pairing" in the app)
+// the app shows a window asking the user to allow this extension.
+let pairFail = 0;
+async function getToken(app, renew) {
+  if (!renew) { const g = await chrome.storage.local.get("token"); if (g.token) return g.token; }
+  if (Date.now() < pairFail) return "";
+  try {
+    const r = await fetch(`http://127.0.0.1:${app.port}/pair`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    const j = await r.json();
+    if (j.token) { await chrome.storage.local.set({ token: j.token }); return j.token; }
+  } catch (e) { /* app closed */ }
+  pairFail = Date.now() + 60000;      // refused or no answer: do not ask again right away
+  return "";
+}
+async function callApp(app, path, body, signal) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const token = await getToken(app, attempt > 0);
+    if (!token) return null;
+    const r = await fetch(`http://127.0.0.1:${app.port}${path}`, {
+      method: "POST", signal, body: JSON.stringify(body),
+      headers: { "Content-Type": "application/json", "X-MyDM-Token": token } });
+    if (r.status !== 401) return r;
+    await chrome.storage.local.remove("token");
   }
   return null;
 }
@@ -98,8 +125,8 @@ async function supports(url) {
   let v = { site: false, engine: !!(app && app.engine), app: !!app };
   if (app) {
     try {
-      const r = await fetch(`http://127.0.0.1:${app.port}/supports`, {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url }) });
+      const r = await callApp(app, "/supports", { url });
+      if (!r) return { site: false, engine: v.engine, app: true, paired: false };
       const j = await r.json();
       v = { site: !!j.site, engine: !!j.engine, app: true };
     } catch (e) { /* not supported */ }
@@ -133,19 +160,34 @@ async function sendToApp(m) {
     cookie = cs.map((c) => c.name + "=" + c.value).join("; ");
   } catch (e) { /* no cookies */ }
   try {
-    const r = await fetch(`http://127.0.0.1:${app.port}/add`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url: m.url, referer: m.referer || "", cookie, ua: navigator.userAgent,
+    const r = await callApp(app, "/add", { url: m.url, referer: m.referer || "", cookie, ua: navigator.userAgent,
                              name: m.name || "", action: m.action || "start", kind: m.kind || "file",
-                             urls: m.urls || [],
-                             cookiejar: ["site", "link", "links"].includes(m.kind) ? await cookieList(m.cookieUrl || m.url) : [] }),
-    });
+                             urls: m.urls || [], pick: m.pick == null ? -1 : m.pick,
+                             cookiejar: app.cookies && ["site", "link", "links"].includes(m.kind) ? await cookieList(m.cookieUrl || m.url) : [] });
+    if (!r) return { ok: false, error: "not-paired" };
     return { ok: r.ok, error: r.ok ? "" : "refused" };
   } catch (e) { return { ok: false, error: "failed" }; }
 }
 
+// the qualities (with sizes) of a video page / stream, read by the app, for the list shown in the bar
+async function getFormats(m) {
+  const app = await findApp();
+  if (!app) return { error: "app" };
+  let cookie = "";
+  try { cookie = (await chrome.cookies.getAll({ url: m.url })).map((c) => c.name + "=" + c.value).join("; "); } catch (e) { /* none */ }
+  const ctl = new AbortController();
+  const to = setTimeout(() => ctl.abort(), 120000);
+  try {
+    const r = await callApp(app, "/formats", { url: m.url, kind: m.kind, referer: m.referer || "", cookie,
+                             ua: navigator.userAgent, cookiejar: app.cookies && m.kind === "site" ? await cookieList(m.url) : [] }, ctl.signal);
+    if (!r) return { error: "app" };
+    return await r.json();
+  } catch (e) { return { error: "fail", msg: "" }; }
+  finally { clearTimeout(to); }
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, reply) => {
+  if (msg.type === "formats") { getFormats(msg).then(reply); return true; }
   if (msg.type === "media") {
     const id = msg.tabId != null ? msg.tabId : sender.tab && sender.tab.id;
     chrome.storage.session.get("m" + id).then((g) => reply(g["m" + id] || []));

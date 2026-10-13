@@ -27,7 +27,7 @@ Project page: https://github.com/amirebni/idm
 - Clipboard watcher: ask first (default) or add automatically
 
 **Browser extension (Chrome / Edge, Manifest V3)**
-- Download bar over playing video/audio
+- Download bar over playing video/audio; on YouTube / Aparat / streams it lists the qualities with approximate sizes right in the page, and only the one you click is sent to MyDM
 - Right-click "Download with MyDM" on links and on selected text (every URL in the selection)
 - Sends referer, cookies and user agent to the app
 
@@ -37,6 +37,11 @@ Project page: https://github.com/amirebni/idm
 - Resizable windows, columns (drag header edges) and sidebar (drag the splitter); sizes are remembered; View > Reset layout
 - Settings tabs: General, Connection, Browser, Video, About
 - About tab: version, short description, GitHub link and **Check for updates**
+
+## Security, privacy and logs
+- **Pairing:** the extension talks to MyDM over `127.0.0.1` only, and every request carries a secret token. The first time, MyDM shows a window asking you to allow the extension. Settings > Browser > *Reset extension pairing* makes the old token invalid.
+- **Cookies:** the login cookies of the video site (YouTube...) are only sent while you download a video, can be switched off in Settings > Video, and the file is deleted automatically about 10 minutes after the last video download (and when MyDM closes, if no video download is unfinished).
+- **Log:** errors and download failures are written to `%USERPROFILE%\.mydm\logs\app.log` (Help > *Open log folder*). Attach it when reporting a problem.
 
 ## Run from source
 ```sh
@@ -49,8 +54,8 @@ For video sites put the `yt-dlp` file, `ffmpeg.exe` and `qjs.exe` next to `dm.py
 1. Push the repository to GitHub. `.github/workflows/build.yml` builds the installer with PyInstaller + Inno Setup and uploads two artifacts: `MyDM-Setup-vX` and `MyDM-Extension-vX` (the workflow also runs weekly to pick up the newest yt-dlp).
 2. To publish a release (needed by **Check for updates**), push a tag:
    ```sh
-   git tag v3.0
-   git push origin v3.0
+   git tag v3.2
+   git push origin v3.2
    ```
    The workflow attaches the installer and `MyDM_Extension.zip` to the GitHub release.
 

@@ -1,4 +1,4 @@
-import os, re, webbrowser, sys, json, math, time, queue, shutil, mimetypes, threading, subprocess
+import os, re, webbrowser, logging, logging.handlers, secrets, hmac, sys, json, math, time, queue, shutil, mimetypes, threading, subprocess
 import tkinter as tk
 import tkinter.font as tkfont
 from concurrent.futures import ThreadPoolExecutor
@@ -34,6 +34,30 @@ except Exception:
 
 DATA = Path(os.environ.get("MYDM_HOME") or Path.home() / ".mydm")
 STATE = DATA / "state.json"
+LOGDIR = DATA / "logs"
+LOGFILE = LOGDIR / "app.log"
+LOG = logging.getLogger("mydm")
+
+
+def setup_log():
+    """Write everything that goes wrong to ~/.mydm/logs/app.log (3 files x 1 MB)."""
+    LOG.setLevel(logging.DEBUG)
+    if LOG.handlers:
+        return
+    try:
+        LOGDIR.mkdir(parents=True, exist_ok=True)
+        h = logging.handlers.RotatingFileHandler(LOGFILE, maxBytes=1_000_000, backupCount=2, encoding="utf-8")
+        h.setFormatter(logging.Formatter("%(asctime)s %(levelname)-7s %(threadName)s  %(message)s"))
+        LOG.addHandler(h)
+    except OSError:
+        LOG.addHandler(logging.NullHandler())
+    LOG.info("MyDM %s started (%s)", VERSION, sys.platform)
+
+
+def log_crash(kind, value, tb, *a):
+    LOG.error("Unhandled %s: %s", getattr(kind, "__name__", kind), value, exc_info=(kind, value, tb))
+
+
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                     "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"}
 CATS = {
@@ -54,7 +78,7 @@ RUNNING = ("Waiting", "Connecting", "Downloading")
 ACTIONS = ["Do nothing", "Exit MyDM", "Lock screen", "Log off", "Sleep", "Hibernate",
            "Restart", "Shut down", "Shut down (force close apps)"]
 WIN = sys.platform.startswith("win")
-VERSION = "3.0"
+VERSION = "3.2"
 REPO = "amirebni/idm"
 REPO_URL = "https://github.com/" + REPO
 EXT_ID = "njeclpgnkpobfkiefclomnolojaacned"          # fixed ID of the bundled browser extension
@@ -66,7 +90,8 @@ CFG = {"folder": str(Path.home() / "Downloads"), "segments": 8, "parallel": 3,
        "autostart": False, "subfolders": True, "popup": True, "sound": False,
        "theme": "system", "density": "compact", "geom": "", "sched": dict(SCHED), "bridge": True,
        "ytq": "1080p", "cookies": "", "cookiefile": "", "ipv4": True, "watch_media": False,
-       "clip_mode": "ask", "colw": {}, "side_w": 214, "wins": {}}
+       "clip_mode": "ask", "colw": {}, "side_w": 214, "wins": {},
+       "token": "", "cookies_share": True}
 JOBS = []
 FONT, SC = "TkDefaultFont", 1.0
 
@@ -167,6 +192,7 @@ def check_update():
             return True, f"New version available: {tag.lstrip('vV')} (you have {VERSION}).", url
         return False, f"You have the latest version ({VERSION}).", url
     except Exception as e:
+        LOG.info("update check failed: %s", e)
         return False, f"Could not check for updates: {str(e)[:120]}", REPO_URL + "/releases"
 
 
@@ -176,6 +202,7 @@ def system_proxy():
         p = urllib.request.getproxies()
         return p.get("https") or p.get("http") or p.get("socks") or ""
     except Exception:
+        LOG.debug("system_proxy", exc_info=True)
         return ""
 
 
@@ -222,6 +249,7 @@ def ytdlp():
                     return yt_dlp
                 except Exception as ex:
                     _YT[2] = f"{type(ex).__name__}: {ex}"
+                    LOG.warning("video engine did not load: %s", _YT[2])
                     sys.path.remove(p)
                     for k in [k for k in sys.modules if k.startswith("yt_dlp")]:
                         del sys.modules[k]
@@ -229,7 +257,7 @@ def ytdlp():
             import yt_dlp
             _YT[0] = yt_dlp
         except Exception:
-            pass
+            LOG.debug("ytdlp", exc_info=True)
         return _YT[0]
 
 
@@ -247,6 +275,7 @@ def update_engine():
         os.replace(tmp, DATA / "yt-dlp")
         return True, "Updated. Restart MyDM to use the new version."
     except Exception as ex:
+        LOG.warning("engine update failed: %s", ex)
         return False, "Update failed: " + str(ex)[:120]
 
 
@@ -268,6 +297,7 @@ def is_media(url):
             _IES = [c for c in gen_extractor_classes() if c.IE_NAME != "generic"]
         return any(c.suitable(url) for c in _IES)
     except Exception:
+        LOG.debug("is_media", exc_info=True)
         return False
 
 
@@ -304,7 +334,7 @@ def save_ext_cookies(items):
         tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
         os.replace(tmp, ext_cookie_path())
     except Exception:
-        pass
+        LOG.debug("save_ext_cookies", exc_info=True)
 
 
 def ydl_opts(**extra):
@@ -439,6 +469,7 @@ def hls_choices(job):
                 t = http_get(urljoin(job.url, o["link"]), headers=job.hdrs(), timeout=15).text
                 return sum(float(x) for x in re.findall(r"#EXTINF:([\d.]+)", t))
             except Exception:
+                LOG.debug("dur_of", exc_info=True)
                 return 0
         with ThreadPoolExecutor(max_workers=4) as ex:
             durs = list(ex.map(dur_of, opts))
@@ -454,6 +485,7 @@ def hls_choices(job):
         opts.sort(key=lambda o: (o["h"], o["bw"]), reverse=True)
         return opts
     except Exception:
+        LOG.debug("dur_of", exc_info=True)
         return []
 
 
@@ -476,7 +508,7 @@ def open_chrome_ext():
         else:
             subprocess.Popen(["xdg-open", "chrome://extensions"])
     except Exception:
-        pass
+        LOG.debug("open_chrome_ext", exc_info=True)
 
 
 class _Server(ThreadingHTTPServer):
@@ -484,8 +516,49 @@ class _Server(ThreadingHTTPServer):
     daemon_threads = True
 
 
+FORMATS = {}          # url -> qualities read for the browser extension (so a later "pick" can use them)
+FORMATS_LOCK = threading.Lock()
+
+
+def formats_for(m):
+    """Read the available qualities of a page/stream for the extension's quality list."""
+    url = m["url"]
+    if CFG["cookies_share"]:
+        save_ext_cookies(m.get("cookiejar"))
+    try:
+        if m.get("kind") == "stream":
+            j = Job(url, CFG["folder"], "stream")
+            j.referer, j.cookie, j.ua = m.get("referer", ""), m.get("cookie", ""), m.get("ua", "")
+            opts, title = hls_choices(j), ""
+        else:
+            if not ytdlp():
+                return {"error": "engine"}
+            with ytdlp().YoutubeDL(ydl_opts(extract_flat="in_playlist", skip_download=True)) as ydl:
+                info = ydl.sanitize_info(ydl.extract_info(url, download=False))
+            if info.get("_type") == "playlist":
+                return {"error": "playlist"}
+            opts, title = quality_options(info, bool(ffmpeg_path())), info.get("title") or ""
+    except Exception as ex:
+        msg = re.sub(r"\x1b\[[0-9;]*m", "", str(ex)).strip()[:300]
+        LOG.warning("extension asked for qualities of %s: %s", url, msg)
+        return {"error": "fail", "msg": msg, "bot": "sign in" in msg.lower() or "bot" in msg.lower()}
+    if not opts:
+        return {"opts": []}
+    with FORMATS_LOCK:
+        for k in [k for k, v in FORMATS.items() if time.time() - v["t"] > 1800]:
+            del FORMATS[k]
+        FORMATS[url] = {"t": time.time(), "title": title, "opts": opts}
+    return {"title": title, "default": pick_default(opts) if m.get("kind") != "stream" else 0,
+            "opts": [{"label": o["label"], "detail": o.get("detail", ""), "size": int(o.get("size") or 0),
+                      "audio": bool(o.get("audio"))} for o in opts]}
+
+
+PAIR = {"busy": False, "deny_until": 0.0}
+
+
 def start_bridge(inbox):
-    """Tiny local web server (127.0.0.1 only) that the browser extension talks to."""
+    """Tiny local web server (127.0.0.1 only) that the browser extension talks to.
+    Besides the extension's origin, every request needs the shared token that the user approved once."""
     class H(BaseHTTPRequestHandler):
         def log_message(self, *a):
             pass
@@ -497,13 +570,17 @@ def start_bridge(inbox):
             return (CFG["bridge"] and self.host_ok()
                     and self.headers.get("Origin") == "chrome-extension://" + EXT_ID)
 
+        def token_ok(self):
+            t = CFG.get("token") or ""
+            return bool(t) and hmac.compare_digest(self.headers.get("X-MyDM-Token", "").encode(), t.encode())
+
         def reply(self, code, obj=None):
             body = json.dumps(obj).encode() if obj is not None else b""
             self.send_response(code)
             if self.origin_ok():
                 self.send_header("Access-Control-Allow-Origin", self.headers["Origin"])
                 self.send_header("Access-Control-Allow-Private-Network", "true")
-                self.send_header("Access-Control-Allow-Headers", "Content-Type")
+                self.send_header("Access-Control-Allow-Headers", "Content-Type, X-MyDM-Token")
                 self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
                 self.send_header("Vary", "Origin")
             self.send_header("Content-Type", "application/json")
@@ -516,15 +593,36 @@ def start_bridge(inbox):
 
         def do_GET(self):
             if self.path == "/ping" and self.host_ok():
-                self.reply(200, {"app": "MyDM", "version": VERSION, "engine": bool(ytdlp())})
+                self.reply(200, {"app": "MyDM", "version": VERSION, "engine": bool(ytdlp()),
+                                 "cookies": bool(CFG["cookies_share"])})
             else:
                 self.reply(404)
 
         def do_POST(self):
-            if self.path not in ("/add", "/supports"):
+            if self.path not in ("/add", "/supports", "/formats", "/pair"):
                 return self.reply(404)
             if not self.origin_ok():
+                LOG.warning("bridge: %s refused (origin %r)", self.path, self.headers.get("Origin"))
                 return self.reply(403)
+            if self.path == "/pair":                  # the user must approve this in the app window
+                if PAIR["busy"] or time.time() < PAIR["deny_until"]:
+                    return self.reply(429, {"error": "wait"})
+                PAIR["busy"] = True
+                try:
+                    ev, res = threading.Event(), {}
+                    inbox.put({"_pair": (ev, res)})
+                    ev.wait(120)
+                finally:
+                    PAIR["busy"] = False
+                if res.get("ok"):
+                    LOG.info("bridge: extension paired")
+                    return self.reply(200, {"token": CFG["token"]})
+                PAIR["deny_until"] = time.time() + 60
+                LOG.info("bridge: pairing refused or timed out")
+                return self.reply(403, {"error": "denied"})
+            if not self.token_ok():
+                LOG.warning("bridge: %s without a valid token", self.path)
+                return self.reply(401, {"error": "token"})
             try:
                 n = int(self.headers.get("Content-Length") or 0)
                 if n > 1500000:
@@ -544,15 +642,22 @@ def start_bridge(inbox):
                             m["cookiejar"].append({"d": z("d"), "p": z("p") or "/", "n": z("n"), "v": z("v"),
                                                    "s": bool(c.get("s")), "e": float(c.get("e") or 0)})
                     except Exception:
-                        pass
+                        LOG.debug("do_POST", exc_info=True)
+                try:
+                    m["pick"] = int(d.get("pick", -1))
+                except (TypeError, ValueError):
+                    m["pick"] = -1
                 if not m["url"] and m["urls"]:
                     m["url"] = m["urls"][0]
                 if not m["url"].startswith(("http://", "https://")):
                     return self.reply(400)
             except Exception:
+                LOG.debug("do_POST", exc_info=True)
                 return self.reply(400)
             if self.path == "/supports":
                 return self.reply(200, {"site": is_media(m["url"]), "engine": bool(ytdlp())})
+            if self.path == "/formats":
+                return self.reply(200, formats_for(m))
             inbox.put(m)
             self.reply(200, {"ok": True})
 
@@ -578,7 +683,7 @@ def open_path(p, select=False):
         else:
             subprocess.Popen(["xdg-open", os.path.dirname(p) if select else p])
     except Exception:
-        pass
+        LOG.debug("open_path", exc_info=True)
 
 
 def system_dark():
@@ -596,6 +701,7 @@ def system_dark():
                            capture_output=True, text=True)
         return "dark" in r.stdout
     except Exception:
+        LOG.debug("system_dark", exc_info=True)
         return False
 
 
@@ -611,7 +717,7 @@ def titlebar(win, dark):
             if ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(v), 4) == 0:
                 break
     except Exception:
-        pass
+        LOG.debug("titlebar", exc_info=True)
 
 
 def set_startup(on):
@@ -627,7 +733,7 @@ def set_startup(on):
         else:
             winreg.DeleteValue(k, "MyDM")
     except Exception:
-        pass
+        LOG.debug("set_startup", exc_info=True)
 
 
 def power_cmd(action):
@@ -868,6 +974,7 @@ class Job:
                 os.replace(self.path + ".part", self.path)
                 self.status = "Done"
         except Exception as ex:
+            LOG.warning("download failed: %s  (%s)", self.url, ex, exc_info=True)
             self.status = ("Paused" if self.kind != "file" and self.stop.is_set()
                            else "Error: " + re.sub(r"\x1b\[[0-9;]*m", "", str(ex))[:160])
 
@@ -897,6 +1004,7 @@ class Job:
                 tries = 0
             except Exception as ex:
                 tries += 1
+                LOG.info("segment retry %s/5: %s  (%s)", tries, self.url, ex)
                 if tries > 5:
                     self.err = str(ex)
                     self.stop.set()
@@ -985,7 +1093,7 @@ class Job:
                 if m:
                     dur = int(m.group(1) or 0) * 3600 + int(m.group(2) or 0) * 60 + float(m.group(3) or 0)
         except Exception:
-            pass
+            LOG.debug("stream_info", exc_info=True)
         return dur
 
     def killer(self, p):
@@ -994,7 +1102,7 @@ class Job:
                 try:
                     p.kill()
                 except Exception:
-                    pass
+                    LOG.debug("killer", exc_info=True)
                 return
 
     def run_stream(self):
@@ -2002,6 +2110,7 @@ class FetchDialog(tk.Toplevel):
                 with ytdlp().YoutubeDL(ydl_opts(extract_flat="in_playlist", skip_download=True)) as ydl:
                     self.res["info"] = ydl.sanitize_info(ydl.extract_info(self.url, download=False))
         except Exception as ex:
+            LOG.warning("could not read video %s: %s", self.url, ex)
             self.res["err"] = str(ex)
 
     def cancel(self):
@@ -2119,7 +2228,7 @@ class Countdown(tk.Toplevel):
                 try:
                     subprocess.Popen(cmd, creationflags=0x08000000 if WIN else 0)
                 except Exception:
-                    pass
+                    LOG.debug("step", exc_info=True)
             return
         self.lbl.config(text=f"{self.why}\n\n{self.action} in {self.n} s")
         self.n -= 1
@@ -2135,7 +2244,11 @@ class App:
         self.inbox = queue.Queue()
         self.srv, self.port = start_bridge(self.inbox)
         self.last_clip, self.note, self.note_until, self.ticks = "", "", 0, 0
+        setup_log()
         self.load()
+        if not CFG.get("token"):
+            CFG["token"] = secrets.token_urlsafe(24)
+            self.save()
         root.title("MyDM " + VERSION)
         root.geometry(CFG["geom"] or f"{S(1220)}x{S(780)}")
         root.minsize(S(1100), S(520))
@@ -2197,7 +2310,7 @@ class App:
         helpm = menu([("Open extension folder", lambda: open_path(ext_dir())),
                       ("Open Chrome extensions page", open_chrome_ext),
                       ("Update video engine", self.update_engine_bg), None,
-                      ("Check for updates", lambda: self.settings("About")), ("About MyDM", self.about)])
+                      ("Open log folder", lambda: open_path(str(LOGDIR))), ("Check for updates", lambda: self.settings("About")), ("About MyDM", self.about)])
         self.menubar = MenuBar(root, [("Tasks", tasks), ("File", files), ("Downloads", downs),
                                       ("View", theme_menu()), ("Help", helpm)], self.toggle_theme)
         self.menubar.pack(fill="x")
@@ -2267,7 +2380,7 @@ class App:
                     w.dnd_bind("<<DropEnter>>", lambda e: self.drag(True))
                     w.dnd_bind("<<DropLeave>>", lambda e: self.drag(False))
             except Exception:
-                pass
+                LOG.debug("theme_menu", exc_info=True)
 
         self.retheme()
         root.protocol("WM_DELETE_WINDOW", self.close)
@@ -2376,6 +2489,8 @@ class App:
 
     # ---- state ----
     def load(self):
+        if not STATE.exists():
+            return
         try:
             d = json.loads(STATE.read_text(encoding="utf-8"))
             CFG.update(d.get("cfg", {}))
@@ -2384,9 +2499,9 @@ class App:
                 try:
                     JOBS.append(Job.from_dict(x))
                 except Exception:
-                    pass
+                    LOG.debug("load", exc_info=True)
         except Exception:
-            pass
+            LOG.debug("load", exc_info=True)
 
     def save(self):
         try:
@@ -2396,7 +2511,7 @@ class App:
                            encoding="utf-8")
             os.replace(tmp, STATE)
         except Exception:
-            pass
+            LOG.debug("save", exc_info=True)
 
     def close(self):
         self.closing = True
@@ -2409,7 +2524,8 @@ class App:
         try:
             self.srv and self.srv.server_close()
         except Exception:
-            pass
+            LOG.debug("close", exc_info=True)
+        self.clean_cookies(force=not self.media_busy())
         time.sleep(0.4)
         self.save()
         self.root.destroy()
@@ -2513,9 +2629,55 @@ class App:
             f.write("\n".join(urls))
         self.say(f"{len(urls)} link(s) exported")
 
+    def pair_prompt(self, ev, res):
+        self.root.deiconify()
+        self.root.lift()
+        res["ok"] = messagebox.askyesno(
+            "Browser extension",
+            "The MyDM browser extension wants to connect to this program.\n\n"
+            "Allow it?  (Say Yes only if you just installed, updated or reset the extension.)",
+            parent=self.root)
+        ev.set()
+
+    def media_busy(self):
+        return any(j.kind == "media" and (j.status in RUNNING or j.status in ("Queued", "Paused"))
+                   for j in JOBS)
+
+    def clean_cookies(self, force=False):
+        """The login cookies sent by the browser are only kept while a video download may need them."""
+        p = Path(ext_cookie_path())
+        try:
+            if p.exists() and (force or (not self.media_busy() and time.time() - p.stat().st_mtime > 600)):
+                p.unlink()
+                LOG.info("browser cookies deleted")
+        except OSError:
+            LOG.debug("clean_cookies", exc_info=True)
+
+    def reset_pairing(self):
+        CFG["token"] = secrets.token_urlsafe(24)
+        self.save()
+        LOG.info("extension pairing reset")
+        self.say("Extension pairing reset - the extension asks again on next use")
+
     def from_browser(self, m):
+        if "_pair" in m:
+            ev, res = m["_pair"]
+            self.root.after(50, lambda: self.pair_prompt(ev, res))
+            return
         url, kind = m["url"], m.get("kind") or "file"
-        save_ext_cookies(m.get("cookiejar"))
+        if CFG["cookies_share"]:
+            save_ext_cookies(m.get("cookiejar"))
+        pick = m.get("pick", -1)
+        cache = FORMATS.get(url) if pick >= 0 else None
+        if cache and pick >= len(cache["opts"]):
+            cache = None
+        if kind == "site" and cache:             # quality already chosen in the browser
+            if any(j.url == url for j in JOBS):
+                self.say("This video is already in the list")
+            else:
+                self.add_media(url, {"title": cache["title"]}, cache["opts"][pick], m["action"] != "queue")
+                self.say("Added from the browser: " + cache["title"])
+            return
         if kind == "site":                       # a page the video engine understands (YouTube, Aparat...)
             self.root.deiconify()
             self.media_flow(url)
@@ -2545,6 +2707,14 @@ class App:
         j.referer, j.cookie, j.ua = m["referer"], m["cookie"], m["ua"]
         if m["name"]:
             j.name = clean(m["name"])
+        if j.kind == "stream" and cache:               # quality already chosen in the browser
+            j.fmt = cache["opts"][pick]["fmt"]
+            JOBS.append(j)
+            self.save()
+            self.say("Added from the browser: " + j.name)
+            if m["action"] != "queue":
+                self.start([j])
+            return
         if j.kind == "stream":                         # ask which quality, if the stream offers several
             def then(u, info):
                 if info["opts"]:
@@ -2816,6 +2986,17 @@ class App:
         ttk.Button(br, text="Open extension folder", command=lambda: open_path(ext_dir())).pack(side="left")
         ttk.Button(br, text="Open Chrome extensions page", command=open_chrome_ext).pack(
             side="left", padx=6)
+        pr = ttk.Frame(b)
+        pr.grid(row=8, column=0, columnspan=3, sticky="w", pady=(S(8), 0))
+        ttk.Button(pr, text="Reset extension pairing", command=lambda: (
+            self.reset_pairing(), pr_msg.config(text="Done. The extension will ask for permission again."))
+        ).pack(side="left")
+        pr_msg = ttk.Label(pr, text="", style="Sub.TLabel")
+        pr_msg.pack(side="left", padx=10)
+        ttk.Label(b, style="Sub.TLabel", wraplength=S(520), justify="left", text=(
+            "Only an extension you approved in MyDM can send downloads. The first time the extension "
+            "talks to MyDM, a window asks you to allow it.")).grid(
+            row=9, column=0, columnspan=3, sticky="w", pady=(S(6), 0))
 
         v = page("Video")
         combo(v, 0, "Default quality", "ytq", ["Best", "1080p", "720p", "480p", "360p", "Audio (MP3)"],
@@ -2832,11 +3013,12 @@ class App:
             "be read directly (use Firefox or a cookies.txt file).")).grid(
             row=3, column=0, columnspan=3, sticky="w", pady=(0, S(4)))
         check(v, 4, "Force IPv4 for video sites (recommended with a VPN)", "ipv4")
+        check(v, 7, "Use the browser's login cookies for video sites (YouTube needs this)", "cookies_share")
         check(v, 5, "Offer a video download for video links copied to the clipboard", "watch_media")
         ttk.Label(v, style="Sub.TLabel", justify="left", wraplength=S(520), text=self.video_status()).grid(
-            row=6, column=0, columnspan=3, sticky="w", pady=(S(10), S(4)))
+            row=8, column=0, columnspan=3, sticky="w", pady=(S(10), S(4)))
         ub = ttk.Frame(v)
-        ub.grid(row=7, column=0, columnspan=3, sticky="w")
+        ub.grid(row=9, column=0, columnspan=3, sticky="w")
         upd_btn = ttk.Button(ub, text="Update video engine")
         upd_btn.pack(side="left")
         upd_msg = ttk.Label(ub, text="", style="Sub.TLabel", wraplength=S(300), justify="left")
@@ -2900,6 +3082,8 @@ class App:
             row=7, column=0, columnspan=3, sticky="w", pady=(S(14), 0))
         ttk.Label(ab, style="Sub.TLabel", text="Data folder: " + str(DATA)).grid(
             row=8, column=0, columnspan=3, sticky="w", pady=(S(4), 0))
+        ttk.Button(ab, text="Open log folder", command=lambda: open_path(str(LOGDIR))).grid(
+            row=9, column=0, sticky="w", pady=(S(8), 0))
         if tab == "About":
             nb.select(ab)
 
@@ -2921,10 +3105,13 @@ class App:
                        ytq=vs["ytq"].get(),
                        cookies="" if vs["cookies"].get() == "none" else vs["cookies"].get(),
                        watch_media=vs["watch_media"].get(), ipv4=vs["ipv4"].get(),
+                       cookies_share=vs["cookies_share"].get(),
                        cookiefile=vs["cookiefile"].get().strip().strip('"'),
                        clip_mode=next(k for k, x in clips.items() if x == vs["clip_mode"].get()))
             if WIN and getattr(sys, "frozen", False):
                 set_startup(vs["startup"].get())
+            if not CFG["cookies_share"]:
+                self.clean_cookies(force=True)
             self.save()
             self.retheme()
             self.lst.redraw()
@@ -3119,11 +3306,16 @@ class App:
             counts["c:" + j.cat] += 1
             counts["queue"] += j.status in ("Queued", "Waiting")
             if j.status != j.prev:
+                if j.status.startswith("Error"):
+                    LOG.warning("%s -> %s   %s", j.prev, j.status, j.url)
+                else:
+                    LOG.info("%s -> %s   %s", j.prev, j.status, j.name)
                 if j.status == "Done" and CFG["sound"]:
                     try:
                         import winsound
                         winsound.MessageBeep()
                     except Exception:
+                        LOG.debug("tick", exc_info=True)
                         self.root.bell()
                 j.prev = j.status
         self.side.set_counts(counts)
@@ -3162,6 +3354,8 @@ class App:
         self.update_tb()
         if self.ticks % 10 == 0:
             self.save()
+        if self.ticks % 40 == 0:
+            self.clean_cookies()
         self.root.after(500, self.tick)
 
 
@@ -3170,12 +3364,16 @@ if __name__ == "__main__":
         import ctypes
         ctypes.windll.shcore.SetProcessDpiAwareness(1)
     except Exception:
-        pass
+        LOG.debug("tick", exc_info=True)
     try:
         root = BaseTk()
     except Exception:          # drag-and-drop library failed to load
         TkinterDnD = None
         root = tk.Tk()
     SC = max(1.0, root.winfo_fpixels("1i") / 96)
+    setup_log()
+    sys.excepthook = log_crash
+    threading.excepthook = lambda a: log_crash(a.exc_type, a.exc_value, a.exc_traceback)
+    root.report_callback_exception = log_crash
     App(root)
     root.mainloop()
