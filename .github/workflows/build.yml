@@ -15,7 +15,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.22"
       - run: pip install "requests[socks]" tkinterdnd2 pyinstaller
       - run: pyinstaller --noconfirm --noconsole --onefile --name MyDM --collect-all tkinterdnd2 --hidden-import socks --hidden-import urllib3.contrib.socks dm.py
       - name: Download helper programs
@@ -31,11 +31,11 @@ jobs:
       - run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss'
       - uses: actions/upload-artifact@v4
         with:
-          name: MyDM-Setup-v3.0
+          name: MyDM-Setup-v3.2
           path: Output/*.exe
       - uses: actions/upload-artifact@v4
         with:
-          name: MyDM-Extension-v3.0
+          name: MyDM-Extension-v3.2
           path: extension
       - name: Zip extension
         if: startsWith(github.ref, 'refs/tags/v')
