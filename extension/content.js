@@ -1,4 +1,4 @@
-// MyDM Downloader 3.2 - content script
+// MyDM Downloader 3.4 - content script
 (() => {
   if (window.__mydmLoaded) return;
   window.__mydmLoaded = true;

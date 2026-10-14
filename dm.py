@@ -1,4 +1,4 @@
-import os, re, webbrowser, logging, logging.handlers, secrets, hmac, sys, json, math, time, queue, shutil, mimetypes, threading, subprocess
+import os, re, webbrowser, logging, logging.handlers, secrets, hmac, struct, zlib, http.client, sys, json, math, time, queue, shutil, mimetypes, threading, subprocess
 import tkinter as tk
 import tkinter.font as tkfont
 from concurrent.futures import ThreadPoolExecutor
@@ -7,7 +7,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from tkinter import ttk, filedialog, messagebox
 from urllib.parse import urlparse, unquote, urljoin
-import requests
 
 def _bundled_modules():
     """Never called. It only lists every standard-library module that yt-dlp (loaded from its zip
@@ -78,7 +77,7 @@ RUNNING = ("Waiting", "Connecting", "Downloading")
 ACTIONS = ["Do nothing", "Exit MyDM", "Lock screen", "Log off", "Sleep", "Hibernate",
            "Restart", "Shut down", "Shut down (force close apps)"]
 WIN = sys.platform.startswith("win")
-VERSION = "3.2"
+VERSION = "3.4"
 REPO = "amirebni/idm"
 REPO_URL = "https://github.com/" + REPO
 EXT_ID = "njeclpgnkpobfkiefclomnolojaacned"          # fixed ID of the bundled browser extension
@@ -91,7 +90,7 @@ CFG = {"folder": str(Path.home() / "Downloads"), "segments": 8, "parallel": 3,
        "theme": "system", "density": "compact", "geom": "", "sched": dict(SCHED), "bridge": True,
        "ytq": "1080p", "cookies": "", "cookiefile": "", "ipv4": True, "watch_media": False,
        "clip_mode": "ask", "colw": {}, "side_w": 214, "wins": {},
-       "token": "", "cookies_share": True}
+       "token": "", "cookies_share": True, "tray": True, "pop_open": False}
 JOBS = []
 FONT, SC = "TkDefaultFont", 1.0
 
@@ -160,6 +159,7 @@ def rrect(c, x0, y0, x1, y1, r, **kw):
 
 
 def http_get(url, **kw):
+    import requests               # loaded on first use: keeps start-up fast
     s = requests.Session()
     mode = CFG["proxy_mode"]
     s.trust_env = mode == "system"          # system = Windows proxy settings + env vars
@@ -286,10 +286,53 @@ def is_stream_url(u):
 _IES = []
 
 
-def is_media(url):
-    """True when yt-dlp has a dedicated extractor for this link (YouTube, Aparat, ...)."""
+def engine_present():
+    """Is the video engine available? (A file check only: it does not load yt-dlp into memory.)"""
+    if _YT[0]:
+        return True
+    if any(os.path.isfile(p) for p in (str(DATA / "yt-dlp"), os.path.join(app_dir(), "yt-dlp"))):
+        return True
+    try:
+        import importlib.util
+        return importlib.util.find_spec("yt_dlp") is not None
+    except Exception:
+        return False
+
+
+# The well-known video sites are recognised from the address alone. Asking yt-dlp's ~1800 extractors
+# means loading yt-dlp (memory + seconds), so that only happens for links the user adds on purpose.
+FAST_SITES = [
+    (r"(^|\.)(youtube\.com|youtube-nocookie\.com)$", r"^/(watch|shorts/|live/|embed/|v/|playlist)"),
+    (r"^youtu\.be$", r"^/."), (r"(^|\.)aparat\.com$", r"^/(v/|video/)"),
+    (r"(^|\.)varzesh3\.com$", r"^/(video|news)"), (r"(^|\.)vimeo\.com$", r"^/\d"),
+    (r"(^|\.)dailymotion\.com$", r"^/video"), (r"(^|\.)twitch\.tv$", r"^/."),
+    (r"(^|\.)tiktok\.com$", r"/video/|^/@"), (r"(^|\.)instagram\.com$", r"^/(p|reel|reels|tv)/"),
+    (r"(^|\.)(twitter|x)\.com$", r"/status/"), (r"(^|\.)soundcloud\.com$", r"^/[^/]+/[^/]+"),
+    (r"(^|\.)bilibili\.com$", r"^/video/"), (r"(^|\.)streamable\.com$", r"^/."),
+]
+
+
+def fast_media(url):
+    try:
+        u = urlparse(url)
+        host = (u.hostname or "").lower()
+        return any(re.search(h, host) and re.search(p, u.path + ("?" + u.query if u.query else ""))
+                   for h, p in FAST_SITES)
+    except Exception:
+        return False
+
+
+def is_media(url, deep=False):
+    """True when the link is a video page the video engine can read (YouTube, Aparat, ...).
+    deep=True also asks every yt-dlp extractor (loads yt-dlp) - only for links the user adds."""
     global _IES
-    if not ytdlp() or os.path.splitext(urlparse(url).path)[1].lstrip(".").lower() in EXTS:
+    if os.path.splitext(urlparse(url).path)[1].lstrip(".").lower() in EXTS:
+        return False
+    if not _IES and fast_media(url):
+        return engine_present()
+    if not _IES and not deep:
+        return False
+    if not ytdlp():
         return False
     try:
         if not _IES:
@@ -593,8 +636,11 @@ def start_bridge(inbox):
 
         def do_GET(self):
             if self.path == "/ping" and self.host_ok():
-                self.reply(200, {"app": "MyDM", "version": VERSION, "engine": bool(ytdlp()),
+                self.reply(200, {"app": "MyDM", "version": VERSION, "engine": engine_present(),
                                  "cookies": bool(CFG["cookies_share"])})
+            elif self.path == "/show" and self.host_ok():       # a second start of MyDM asks the first one to show itself
+                inbox.put({"_show": 1})
+                self.reply(200, {"ok": True})
             else:
                 self.reply(404)
 
@@ -655,7 +701,7 @@ def start_bridge(inbox):
                 LOG.debug("do_POST", exc_info=True)
                 return self.reply(400)
             if self.path == "/supports":
-                return self.reply(200, {"site": is_media(m["url"]), "engine": bool(ytdlp())})
+                return self.reply(200, {"site": is_media(m["url"]), "engine": engine_present()})
             if self.path == "/formats":
                 return self.reply(200, formats_for(m))
             inbox.put(m)
@@ -718,6 +764,257 @@ def titlebar(win, dark):
                 break
     except Exception:
         LOG.debug("titlebar", exc_info=True)
+
+
+def tr(win, root):
+    """transient() only while the main window is visible (a transient of a hidden window stays hidden)."""
+    try:
+        if root.winfo_viewable():
+            win.transient(root)
+    except tk.TclError:
+        pass
+
+
+class _Where:
+    """Where dialogs are centred: the main window, or the screen when that is hidden (tray / minimised)."""
+    hidden = True
+
+    def __init__(self, root):
+        self.w, self.h = root.winfo_screenwidth(), root.winfo_screenheight()
+
+    def winfo_rootx(self):
+        return 0
+
+    def winfo_rooty(self):
+        return self.h // 6
+
+    def winfo_width(self):
+        return self.w
+
+    def winfo_height(self):
+        return self.h * 2 // 3
+
+
+def anchor(root):
+    try:
+        if root.winfo_viewable():
+            return root
+    except tk.TclError:
+        pass
+    return _Where(root)
+
+
+def ontop(win, app):
+    """Bring a window in front of the browser when it was asked for by the browser (or the main window is hidden)."""
+    try:
+        if time.time() < app.front_until or getattr(anchor(app.root), "hidden", False):
+            win.attributes("-topmost", True)
+            win.lift()
+            win.focus_force()
+            win.after(1500, lambda: win.winfo_exists() and win.attributes("-topmost", False))
+    except tk.TclError:
+        pass
+
+
+def make_ico(path):
+    """The tray icon: blue rounded square with a white download arrow, written as a 32x32 PNG-in-ICO."""
+    N, SS = 32, 4
+    acc = (0x2f, 0x6d, 0xf0)
+
+    def tri(px, py, a, b, c):
+        d = (b[1] - c[1]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[1] - c[1])
+        u = ((b[1] - c[1]) * (px - c[0]) + (c[0] - b[0]) * (py - c[1])) / d
+        v = ((c[1] - a[1]) * (px - c[0]) + (a[0] - c[0]) * (py - c[1])) / d
+        return u >= 0 and v >= 0 and u + v <= 1
+
+    def shape(x, y):
+        r = 7
+        cx, cy = min(max(x, r), N - r), min(max(y, r), N - r)
+        if (x - cx) ** 2 + (y - cy) ** 2 > r * r:
+            return 0
+        if 13 <= x <= 19 and 6 <= y <= 15 or tri(x, y, (8, 14), (24, 14), (16, 22)) or (8 <= x <= 24 and 24.5 <= y <= 27):
+            return 2
+        return 1
+    rows = bytearray()
+    for y in range(N):
+        rows.append(0)
+        for x in range(N):
+            cov = [shape(x + (i + .5) / SS, y + (j + .5) / SS) for i in range(SS) for j in range(SS)]
+            a = sum(1 for c in cov if c) / len(cov)
+            w = sum(1 for c in cov if c == 2) / max(1, sum(1 for c in cov if c))
+            rows += bytes([int(acc[k] * (1 - w) + 255 * w) for k in range(3)]) + bytes([int(255 * a)])
+
+    def chunk(t, d):
+        return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xffffffff)
+    png = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", N, N, 8, 6, 0, 0, 0))
+           + chunk(b"IDAT", zlib.compress(bytes(rows), 9)) + chunk(b"IEND", b""))
+    ico = struct.pack("<HHH", 0, 1, 1) + struct.pack("<BBBBHHII", N, N, 0, 0, 1, 32, len(png), 22) + png
+    Path(path).write_bytes(ico)
+
+
+class Tray:
+    """Notification-area icon (Windows, plain ctypes). It lives in its own thread and talks to the app
+    through a queue, so if anything fails the app simply runs without it."""
+    WM_TRAY = 0x0400 + 20
+
+    def __init__(self, tip, ico):
+        self.q, self.ready, self.up, self.hwnd = queue.Queue(), threading.Event(), False, None
+        self.tip, self.ico = tip, ico
+        threading.Thread(target=self._run, daemon=True, name="tray").start()
+        self.ready.wait(3)
+
+    def stop(self):
+        try:
+            if self.hwnd:
+                import ctypes
+                ctypes.windll.user32.PostMessageW(self.hwnd, 0x0010, 0, 0)     # WM_CLOSE
+        except Exception:
+            LOG.debug("tray.stop", exc_info=True)
+
+    def _run(self):
+        try:
+            self._loop()
+        except Exception:
+            LOG.warning("tray failed", exc_info=True)
+        finally:
+            self.up = False
+            self.ready.set()
+
+    def _loop(self):
+        import ctypes
+        from ctypes import wintypes as wt
+        u, sh, k = ctypes.windll.user32, ctypes.windll.shell32, ctypes.windll.kernel32
+        LRESULT = ctypes.c_ssize_t
+        WNDPROC = ctypes.WINFUNCTYPE(LRESULT, wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM)
+
+        class WNDCLASS(ctypes.Structure):
+            _fields_ = [("style", wt.UINT), ("lpfnWndProc", WNDPROC), ("cbClsExtra", ctypes.c_int),
+                        ("cbWndExtra", ctypes.c_int), ("hInstance", wt.HINSTANCE), ("hIcon", wt.HICON),
+                        ("hCursor", wt.HANDLE), ("hbrBackground", wt.HBRUSH), ("lpszMenuName", wt.LPCWSTR),
+                        ("lpszClassName", wt.LPCWSTR)]
+
+        class NID(ctypes.Structure):
+            _fields_ = [("cbSize", wt.DWORD), ("hWnd", wt.HWND), ("uID", wt.UINT), ("uFlags", wt.UINT),
+                        ("uCallbackMessage", wt.UINT), ("hIcon", wt.HICON), ("szTip", wt.WCHAR * 128),
+                        ("dwState", wt.DWORD), ("dwStateMask", wt.DWORD), ("szInfo", wt.WCHAR * 256),
+                        ("uVersion", wt.UINT), ("szInfoTitle", wt.WCHAR * 64), ("dwInfoFlags", wt.DWORD),
+                        ("guidItem", ctypes.c_byte * 16), ("hBalloonIcon", wt.HICON)]
+        u.DefWindowProcW.argtypes = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM]
+        u.DefWindowProcW.restype = LRESULT
+        u.RegisterClassW.argtypes = [ctypes.POINTER(WNDCLASS)]
+        u.RegisterClassW.restype = wt.ATOM
+        u.CreateWindowExW.argtypes = [wt.DWORD, wt.LPCWSTR, wt.LPCWSTR, wt.DWORD, ctypes.c_int, ctypes.c_int,
+                                      ctypes.c_int, ctypes.c_int, wt.HWND, wt.HMENU, wt.HINSTANCE, wt.LPVOID]
+        u.CreateWindowExW.restype = wt.HWND
+        k.GetModuleHandleW.argtypes = [wt.LPCWSTR]
+        k.GetModuleHandleW.restype = wt.HMODULE
+        u.LoadImageW.argtypes = [wt.HINSTANCE, wt.LPCWSTR, wt.UINT, ctypes.c_int, ctypes.c_int, wt.UINT]
+        u.LoadImageW.restype = wt.HANDLE
+        u.LoadIconW.argtypes = [wt.HINSTANCE, ctypes.c_void_p]
+        u.LoadIconW.restype = wt.HICON
+        sh.Shell_NotifyIconW.argtypes = [wt.DWORD, ctypes.POINTER(NID)]
+        sh.Shell_NotifyIconW.restype = wt.BOOL
+        u.CreatePopupMenu.restype = wt.HMENU
+        u.AppendMenuW.argtypes = [wt.HMENU, wt.UINT, ctypes.c_size_t, wt.LPCWSTR]
+        u.TrackPopupMenu.argtypes = [wt.HMENU, wt.UINT, ctypes.c_int, ctypes.c_int, ctypes.c_int, wt.HWND, wt.LPVOID]
+        u.TrackPopupMenu.restype = ctypes.c_int
+        u.DestroyMenu.argtypes = [wt.HMENU]
+        u.SetForegroundWindow.argtypes = [wt.HWND]
+        u.GetCursorPos.argtypes = [ctypes.POINTER(wt.POINT)]
+        u.PostMessageW.argtypes = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM]
+        u.DestroyWindow.argtypes = [wt.HWND]
+        u.PostQuitMessage.argtypes = [ctypes.c_int]
+        u.RegisterWindowMessageW.argtypes = [wt.LPCWSTR]
+        u.RegisterWindowMessageW.restype = wt.UINT
+        u.GetMessageW.argtypes = [ctypes.POINTER(wt.MSG), wt.HWND, wt.UINT, wt.UINT]
+        u.TranslateMessage.argtypes = [ctypes.POINTER(wt.MSG)]
+        u.DispatchMessageW.argtypes = [ctypes.POINTER(wt.MSG)]
+        u.DispatchMessageW.restype = LRESULT
+
+        hicon = u.LoadImageW(None, self.ico, 1, 0, 0, 0x10 | 0x40)          # IMAGE_ICON, from file, default size
+        if not hicon:
+            hicon = u.LoadIconW(None, 32512)                               # the standard application icon
+        tb_created = u.RegisterWindowMessageW("TaskbarCreated")
+        me = self
+
+        def nid():
+            n = NID()
+            n.cbSize = ctypes.sizeof(NID)
+            n.hWnd, n.uID, n.uFlags = me.hwnd, 1, 1 | 2 | 4
+            n.uCallbackMessage, n.hIcon, n.szTip = Tray.WM_TRAY, hicon, me.tip
+            return n
+
+        def add():
+            return bool(sh.Shell_NotifyIconW(0, ctypes.byref(nid())))      # NIM_ADD
+
+        def menu():
+            m = u.CreatePopupMenu()
+            u.AppendMenuW(m, 0, 1, "Open MyDM")
+            u.AppendMenuW(m, 0x800, 0, None)
+            u.AppendMenuW(m, 0, 2, "Exit")
+            pt = wt.POINT()
+            u.GetCursorPos(ctypes.byref(pt))
+            u.SetForegroundWindow(me.hwnd)
+            cmd = u.TrackPopupMenu(m, 0x102, pt.x, pt.y, 0, me.hwnd, None)   # RETURNCMD | RIGHTBUTTON
+            u.PostMessageW(me.hwnd, 0, 0, 0)
+            u.DestroyMenu(m)
+            if cmd:
+                me.q.put("open" if cmd == 1 else "exit")
+
+        def proc(hwnd, msg, wp, lp):
+            try:
+                if msg == Tray.WM_TRAY:
+                    ev = lp & 0xFFFF
+                    if ev in (0x202, 0x203):                                # left click / double click
+                        me.q.put("open")
+                    elif ev in (0x205, 0x7B):                               # right click
+                        menu()
+                    return 0
+                if msg == tb_created:                                       # Explorer restarted
+                    add()
+                    return 0
+                if msg == 0x0010:                                           # WM_CLOSE
+                    u.DestroyWindow(hwnd)
+                    return 0
+                if msg == 0x0002:                                           # WM_DESTROY
+                    sh.Shell_NotifyIconW(2, ctypes.byref(nid()))            # NIM_DELETE
+                    u.PostQuitMessage(0)
+                    return 0
+            except Exception:
+                LOG.debug("tray proc", exc_info=True)
+            return u.DefWindowProcW(hwnd, msg, wp, lp)
+        self._proc = WNDPROC(proc)                                          # keep a reference
+        wc = WNDCLASS()
+        wc.lpfnWndProc, wc.lpszClassName = self._proc, "MyDMTray"
+        wc.hInstance = k.GetModuleHandleW(None)
+        u.RegisterClassW(ctypes.byref(wc))
+        self.hwnd = u.CreateWindowExW(0, "MyDMTray", "MyDM", 0, 0, 0, 0, 0, None, None, wc.hInstance, None)
+        if not self.hwnd:
+            raise OSError("no tray window")
+        self.up = add()
+        self.ready.set()
+        if not self.up:
+            return
+        msg = wt.MSG()
+        while u.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+            u.TranslateMessage(ctypes.byref(msg))
+            u.DispatchMessageW(ctypes.byref(msg))
+
+
+def already_running():
+    """If MyDM is already running (maybe hidden in the tray), ask it to show its window."""
+    for p in PORTS:
+        try:
+            c = http.client.HTTPConnection("127.0.0.1", p, timeout=0.4)
+            c.request("GET", "/ping")
+            if json.loads(c.getresponse().read()).get("app") == "MyDM":
+                c = http.client.HTTPConnection("127.0.0.1", p, timeout=1)
+                c.request("GET", "/show")
+                c.getresponse().read()
+                return True
+        except Exception:
+            continue
+    return False
 
 
 def set_startup(on):
@@ -1288,19 +1585,27 @@ def glyph(c, kind, cx, cy, s, col, w=None):
 
 def keep_size(win, key, minw=360, minh=240):
     """Let a window be resized by the user, and remember its size for next time."""
+    kf = key if callable(key) else (lambda: key)         # a window may keep one size per mode
     win.resizable(True, True)
-    win.update_idletasks()
-    win.minsize(min(S(minw), win.winfo_reqwidth()), min(S(minh), win.winfo_reqheight()))
-    sz = (CFG.get("wins") or {}).get(key)
-    if isinstance(sz, list) and len(sz) == 2:
-        try:
-            win.geometry(f"{max(int(sz[0]), S(minw) // 2)}x{max(int(sz[1]), S(minh) // 2)}")
-        except (ValueError, tk.TclError):
-            pass
+
+    def apply():
+        win.update_idletasks()
+        win.minsize(min(S(minw), win.winfo_reqwidth()), min(S(minh), win.winfo_reqheight()))
+        sz = (CFG.get("wins") or {}).get(kf())
+        if isinstance(sz, list) and len(sz) == 2:
+            try:
+                win.geometry(f"{max(int(sz[0]), S(minw) // 2)}x{max(int(sz[1]), S(minh) // 2)}")
+                return
+            except (ValueError, tk.TclError):
+                pass
+        win.geometry("")                                   # no saved size: natural size
+    apply()
+    win._apply_size = apply
+    win._ks_hold = False
 
     def mem(e):
-        if e.widget is win and e.width > 80 and e.height > 80:
-            CFG.setdefault("wins", {})[key] = [e.width, e.height]
+        if e.widget is win and e.width > 80 and e.height > 80 and not win._ks_hold:
+            CFG.setdefault("wins", {})[kf()] = [e.width, e.height]
     win.bind("<Configure>", mem, add="+")
 
 
@@ -1777,7 +2082,7 @@ class LinkDialog(tk.Toplevel):
         self.app, self.job = app, job
         self.title("Change link")
         self.configure(bg=P["bg"])
-        self.transient(app.root)
+        tr(self, app.root)
         f = ttk.Frame(self, padding=S(18))
         f.pack(fill="both", expand=True)
         ttk.Label(f, text=job.name, font=(FONT, 12, "bold")).pack(anchor="w")
@@ -1803,10 +2108,11 @@ class LinkDialog(tk.Toplevel):
         self.bind("<Escape>", lambda e: self.destroy())
         self.e.bind("<Return>", lambda e: self.go(True))
         self.update_idletasks()
-        r = app.root
+        r = anchor(app.root)
         self.geometry(f"+{r.winfo_rootx() + max(0, (r.winfo_width() - self.winfo_reqwidth()) // 2)}"
                       f"+{r.winfo_rooty() + S(110)}")
         titlebar(self, P["dark"])
+        ontop(self, app)
         keep_size(self, "link", 420, 200)
         self.e.focus_set()
         self.e.select_range(0, "end")
@@ -1827,7 +2133,7 @@ class AddDialog(tk.Toplevel):
         self.app = app
         self.title("Add URL")
         self.configure(bg=P["bg"])
-        self.transient(app.root)
+        tr(self, app.root)
         f = ttk.Frame(self, padding=S(18))
         f.pack(fill="both", expand=True)
         ttk.Label(f, text="Add download links", font=(FONT, 12, "bold")).pack(anchor="w")
@@ -1848,10 +2154,11 @@ class AddDialog(tk.Toplevel):
         self.bind("<Control-Return>", lambda e: self.go())
         self.bind("<Escape>", lambda e: self.destroy())
         self.update_idletasks()
-        r = app.root
+        r = anchor(app.root)
         self.geometry(f"+{r.winfo_rootx() + max(0, (r.winfo_width() - self.winfo_reqwidth()) // 2)}"
                       f"+{r.winfo_rooty() + S(110)}")
         titlebar(self, P["dark"])
+        ontop(self, app)
         keep_size(self, "add", 420, 260)
         self.t.focus_set()
 
@@ -1867,46 +2174,68 @@ class Pop(tk.Toplevel):
         self.app, self.job, self.mode = app, job, None
         self.configure(bg=P["bg"])
         self.protocol("WM_DELETE_WINDOW", self.hide)
-        W = S(500)
-        body = ttk.Frame(self, padding=S(18))
+        W = S(400)
+        body = ttk.Frame(self, padding=(S(16), S(12), S(16), S(12)))
         body.pack(fill="both", expand=True)
-        self.name = ttk.Label(body, text=job.name, font=(FONT, 12, "bold"), wraplength=W)
+        self.name = ttk.Label(body, text=job.name, font=(FONT, 11, "bold"), wraplength=W)
         self.name.pack(anchor="w")
-        u = job.url if len(job.url) < 76 else job.url[:75] + "..."
-        ttk.Label(body, text=u, style="Sub.TLabel").pack(anchor="w", pady=(0, S(8)))
         row = ttk.Frame(body)
-        row.pack(fill="x")
-        self.pct = ttk.Label(row, text="0%", font=(FONT, 24, "bold"))
+        row.pack(fill="x", pady=(S(4), 0))
+        self.pct = ttk.Label(row, text="0%", font=(FONT, 18, "bold"))
         self.pct.pack(side="left")
         self.stat = ttk.Label(row, text="", style="Sub.TLabel")
-        self.stat.pack(side="right", anchor="s", pady=(0, S(4)))
+        self.stat.pack(side="right", anchor="s", pady=(0, S(3)))
         self.bar = ttk.Progressbar(body, maximum=100, length=W)
-        self.bar.pack(fill="x", pady=(S(6), S(10)))
-        ttk.Label(body, text="Connections", style="Sub.TLabel").pack(anchor="w")
-        self.cv = tk.Canvas(body, width=W, height=S(14), highlightthickness=0, bd=0)
+        self.bar.pack(fill="x", pady=(S(4), S(8)))
+        self.btns = ttk.Frame(body)
+        self.btns.pack(fill="x")
+        self.tog = ttk.Label(body, text="", style="Sub.TLabel", cursor="hand2")
+        self.tog.pack(anchor="w", pady=(S(8), 0))
+        self.tog.bind("<Button-1>", lambda e: self.toggle())
+        self.det = ttk.Frame(body)                       # everything else: opens when the user wants it
+        u = job.url if len(job.url) < 66 else job.url[:65] + "..."
+        ttk.Label(self.det, text=u, style="Sub.TLabel").pack(anchor="w", pady=(S(6), S(8)))
+        ttk.Label(self.det, text="Connections", style="Sub.TLabel").pack(anchor="w")
+        self.cv = tk.Canvas(self.det, width=W, height=S(14), highlightthickness=0, bd=0)
         self.cv.pack(fill="x", pady=(S(3), S(10)))
-        ttk.Label(body, text="Speed", style="Sub.TLabel").pack(anchor="w")
-        self.gv = tk.Canvas(body, width=W, height=S(56), highlightthickness=0, bd=0)
+        ttk.Label(self.det, text="Speed", style="Sub.TLabel").pack(anchor="w")
+        self.gv = tk.Canvas(self.det, width=W, height=S(56), highlightthickness=0, bd=0)
         self.gv.pack(fill="x", pady=(S(3), S(10)))
-        grid = ttk.Frame(body)
+        grid = ttk.Frame(self.det)
         grid.pack(fill="x")
         self.v = {}
         for i, k in enumerate(("Size", "Downloaded", "Speed", "Time left", "Save to")):
             ttk.Label(grid, text=k, style="Sub.TLabel").grid(row=i, column=0, sticky="nw", pady=S(2))
-            self.v[k] = ttk.Label(grid, text="", wraplength=S(380), justify="left")
+            self.v[k] = ttk.Label(grid, text="", wraplength=S(300), justify="left")
             self.v[k].grid(row=i, column=1, sticky="w", padx=S(16))
-        self.btns = ttk.Frame(body)
-        self.btns.pack(fill="x", pady=(S(14), 0))
+        self.show_details(CFG["pop_open"], first=True)
         self.refresh()
         self.update_idletasks()
-        r, n = app.root, len(app.pops)
+        r, n = anchor(app.root), len(app.pops)
         x = r.winfo_rootx() + max(0, (r.winfo_width() - self.winfo_reqwidth()) // 2) + S(28) * n
         y = r.winfo_rooty() + max(0, (r.winfo_height() - self.winfo_reqheight()) // 4) + S(28) * n
         self.geometry(f"+{x}+{y}")
         titlebar(self, P["dark"])
-        keep_size(self, "pop", 420, 420)
+        ontop(self, app)
+        keep_size(self, lambda: "pop_l" if CFG["pop_open"] else "pop_s", 320, 120)
         self.attributes("-topmost", True)
         self.after(400, self.untop)
+
+    def show_details(self, on, first=False):
+        CFG["pop_open"] = on
+        self.tog.config(text=("\u25be  Details" if on else "\u25b8  Details"))
+        if on:
+            self.det.pack(fill="both", expand=True)
+        else:
+            self.det.pack_forget()
+        if not first:
+            self._ks_hold = True
+            self._apply_size()
+            self.after(300, lambda: setattr(self, "_ks_hold", False))
+            self.refresh()
+
+    def toggle(self):
+        self.show_details(not CFG["pop_open"])
 
     def untop(self):
         try:
@@ -1993,7 +2322,8 @@ class Pop(tk.Toplevel):
         v["Speed"].config(text=sp or "-")
         v["Time left"].config(text=fmt_eta((j.total - d) / j.speed) if j.speed > 1 and j.total else "-")
         v["Save to"].config(text=j.dir)
-        self.draw()
+        if CFG["pop_open"]:
+            self.draw()
 
 
 class BatchDialog(tk.Toplevel):
@@ -2002,7 +2332,7 @@ class BatchDialog(tk.Toplevel):
         self.app, self.urls, self.ctx = app, urls, ctx
         self.title("Link found" if len(urls) == 1 else f"{len(urls)} links found")
         self.configure(bg=P["bg"])
-        self.transient(app.root)
+        tr(self, app.root)
         f = ttk.Frame(self, padding=S(16))
         f.pack(fill="both", expand=True)
         ttk.Label(f, text="Choose what to download", font=(FONT, 12, "bold")).pack(anchor="w")
@@ -2026,7 +2356,7 @@ class BatchDialog(tk.Toplevel):
         for i, u in enumerate(urls):
             p = urlparse(u)
             base = os.path.basename(p.path)
-            vid = is_media(u) or is_stream_url(u)
+            vid = is_media(u, True) or is_stream_url(u)
             name = p.netloc + " video" if vid else clean(unquote(base)) if base else p.netloc
             dup = any(j.url == u for j in JOBS)
             k = str(i)
@@ -2046,10 +2376,11 @@ class BatchDialog(tk.Toplevel):
             side="right", padx=6)
         ttk.Button(row, text="Cancel", command=self.destroy).pack(side="right")
         self.update_idletasks()
-        r = app.root
+        r = anchor(app.root)
         self.geometry(f"+{r.winfo_rootx() + max(0, (r.winfo_width() - self.winfo_reqwidth()) // 2)}"
                       f"+{r.winfo_rooty() + S(70)}")
         titlebar(self, P["dark"])
+        ontop(self, app)
         keep_size(self, "batch", 480, 320)
         self.attributes("-topmost", True)
         self.after(400, lambda: self.attributes("-topmost", False))
@@ -2083,7 +2414,7 @@ class FetchDialog(tk.Toplevel):
         self.title("MyDM")
         self.configure(bg=P["bg"])
         self.resizable(False, False)
-        self.transient(app.root)
+        tr(self, app.root)
         f = ttk.Frame(self, padding=S(22))
         f.pack()
         ttk.Label(f, text="Getting video information...", font=(FONT, 11, "bold")).pack(anchor="w")
@@ -2095,10 +2426,11 @@ class FetchDialog(tk.Toplevel):
         ttk.Button(f, text="Cancel", command=self.cancel).pack(anchor="e", pady=(S(14), 0))
         self.protocol("WM_DELETE_WINDOW", self.cancel)
         self.update_idletasks()
-        r = app.root
+        r = anchor(app.root)
         self.geometry(f"+{r.winfo_rootx() + max(0, (r.winfo_width() - self.winfo_reqwidth()) // 2)}"
                       f"+{r.winfo_rooty() + S(120)}")
         titlebar(self, P["dark"])
+        ontop(self, app)
         threading.Thread(target=self.work, daemon=True).start()
         self.poll()
 
@@ -2146,7 +2478,7 @@ class MediaDialog(tk.Toplevel):
         self.app, self.url, self.info, self.opts = app, url, info, opts
         self.title("Download video")
         self.configure(bg=P["bg"])
-        self.transient(app.root)
+        tr(self, app.root)
         f = ttk.Frame(self, padding=S(18))
         f.pack(fill="both", expand=True)
         ttk.Label(f, text=info.get("title") or url, font=(FONT, 12, "bold"),
@@ -2183,10 +2515,11 @@ class MediaDialog(tk.Toplevel):
                    command=lambda: self.go(True)).pack(side="right")
         ttk.Button(row, text="Add to list", command=lambda: self.go(False)).pack(side="right", padx=8)
         self.update_idletasks()
-        r = app.root
+        r = anchor(app.root)
         self.geometry(f"+{r.winfo_rootx() + max(0, (r.winfo_width() - self.winfo_reqwidth()) // 2)}"
                       f"+{r.winfo_rooty() + S(70)}")
         titlebar(self, P["dark"])
+        ontop(self, app)
         keep_size(self, "media", 480, 300)
         self.attributes("-topmost", True)
         self.after(400, lambda: self.attributes("-topmost", False))
@@ -2209,8 +2542,10 @@ class Countdown(tk.Toplevel):
         self.lbl.pack()
         ttk.Button(self, text="Cancel", command=self.cancel).pack(pady=(0, S(16)))
         self.protocol("WM_DELETE_WINDOW", self.cancel)
-        self.geometry(f"+{app.root.winfo_rootx() + S(120)}+{app.root.winfo_rooty() + S(120)}")
+        a_ = anchor(app.root)
+        self.geometry(f"+{a_.winfo_rootx() + S(120)}+{a_.winfo_rooty() + S(120)}")
         titlebar(self, P["dark"])
+        ontop(self, app)
         self.attributes("-topmost", True)
         self.step()
 
@@ -2245,6 +2580,7 @@ class App:
         self.srv, self.port = start_bridge(self.inbox)
         self.last_clip, self.note, self.note_until, self.ticks = "", "", 0, 0
         setup_log()
+        self.front_until, self.tray = 0.0, None
         self.load()
         if not CFG.get("token"):
             CFG["token"] = secrets.token_urlsafe(24)
@@ -2383,11 +2719,22 @@ class App:
                 LOG.debug("theme_menu", exc_info=True)
 
         self.retheme()
-        root.protocol("WM_DELETE_WINDOW", self.close)
+        root.protocol("WM_DELETE_WINDOW", self.on_x)
         root.after(80, lambda: titlebar(root, P["dark"]))
+        if WIN and CFG["tray"]:
+            try:
+                ico = DATA / "tray.ico"
+                if not ico.exists():
+                    make_ico(ico)
+                t = Tray("MyDM", str(ico))
+                self.tray = t if t.up else None
+            except Exception:
+                LOG.warning("tray not available", exc_info=True)
         if "--min" in sys.argv:
-            root.iconify()
-        threading.Thread(target=lambda: is_media("https://example.com/x"), daemon=True).start()
+            if self.tray:
+                root.withdraw()
+            else:
+                root.iconify()
         self.tick()
 
     # ---- theme ----
@@ -2526,6 +2873,8 @@ class App:
         except Exception:
             LOG.debug("close", exc_info=True)
         self.clean_cookies(force=not self.media_busy())
+        if self.tray:
+            self.tray.stop()
         time.sleep(0.4)
         self.save()
         self.root.destroy()
@@ -2541,7 +2890,7 @@ class App:
         new = []
         for u in urls:
             if not any(j.url == u for j in JOBS):
-                kind = "stream" if is_stream_url(u) else "media" if is_media(u) else "file"
+                kind = "stream" if is_stream_url(u) else "media" if is_media(u, True) else "file"
                 j = Job(u, CFG["folder"], kind)
                 if kind == "media":
                     j.fmt, j.audio, j.mp3 = default_choice()
@@ -2560,7 +2909,7 @@ class App:
         urls = list(dict.fromkeys(urls))
         if not urls:
             self.say("No link found")
-        elif len(urls) == 1 and is_media(urls[0]):
+        elif len(urls) == 1 and is_media(urls[0], True):
             self.media_flow(urls[0])
         elif len(urls) == 1:
             self.add_many(urls, auto=start)
@@ -2630,14 +2979,57 @@ class App:
         self.say(f"{len(urls)} link(s) exported")
 
     def pair_prompt(self, ev, res):
-        self.root.deiconify()
-        self.root.lift()
-        res["ok"] = messagebox.askyesno(
-            "Browser extension",
-            "The MyDM browser extension wants to connect to this program.\n\n"
-            "Allow it?  (Say Yes only if you just installed, updated or reset the extension.)",
-            parent=self.root)
-        ev.set()
+        """Small window that appears in front of the browser (no need to open the main window)."""
+        w = tk.Toplevel(self.root)
+        w.title("MyDM")
+        w.configure(bg=P["bg"])
+        w.resizable(False, False)
+        body = ttk.Frame(w, padding=S(20))
+        body.pack()
+        ttk.Label(body, text="Allow the browser extension?", font=(FONT, 12, "bold")).pack(anchor="w")
+        ttk.Label(body, style="Sub.TLabel", wraplength=S(380), justify="left", text=(
+            "The MyDM extension in your browser wants to connect to this program.\n"
+            "Allow it only if you just installed, updated or reset the extension.")).pack(
+            anchor="w", pady=(S(8), S(16)))
+        row = ttk.Frame(body)
+        row.pack(fill="x")
+        done = []
+
+        def fin(ok):
+            if done:
+                return
+            done.append(1)
+            res["ok"] = ok
+            ev.set()
+            w.destroy()
+        ttk.Button(row, text="Allow", style="Accent.TButton", command=lambda: fin(True)).pack(side="right")
+        ttk.Button(row, text="Deny", command=lambda: fin(False)).pack(side="right", padx=8)
+        w.protocol("WM_DELETE_WINDOW", lambda: fin(False))
+        w.after(110000, lambda: fin(False))
+        w.update_idletasks()
+        r = anchor(self.root)
+        w.geometry(f"+{r.winfo_rootx() + max(0, (r.winfo_width() - w.winfo_reqwidth()) // 2)}"
+                   f"+{r.winfo_rooty() + S(60)}")
+        titlebar(w, P["dark"])
+        w.attributes("-topmost", True)
+        w.lift()
+        w.focus_force()
+
+    def show_main(self):
+        r = self.root
+        r.deiconify()
+        r.state("normal")
+        r.lift()
+        r.attributes("-topmost", True)
+        r.after(300, lambda: r.attributes("-topmost", False))
+        r.focus_force()
+
+    def on_x(self):
+        """The window's X button: keep running in the notification area when that is possible."""
+        if CFG["tray"] and self.tray and self.tray.up:
+            self.root.withdraw()
+        else:
+            self.close()
 
     def media_busy(self):
         return any(j.kind == "media" and (j.status in RUNNING or j.status in ("Queued", "Paused"))
@@ -2660,6 +3052,10 @@ class App:
         self.say("Extension pairing reset - the extension asks again on next use")
 
     def from_browser(self, m):
+        if "_show" in m:
+            self.show_main()
+            return
+        self.front_until = time.time() + 120          # windows opened for this request come to the front
         if "_pair" in m:
             ev, res = m["_pair"]
             self.root.after(50, lambda: self.pair_prompt(ev, res))
@@ -2679,23 +3075,19 @@ class App:
                 self.say("Added from the browser: " + cache["title"])
             return
         if kind == "site":                       # a page the video engine understands (YouTube, Aparat...)
-            self.root.deiconify()
             self.media_flow(url)
             return
         if kind == "links":                      # right-click on a selection: every link inside it
-            self.root.deiconify()
-            self.root.lift()
             urls = list(dict.fromkeys(m.get("urls") or [url]))
             ctx = {"referer": m["referer"], "cookie": m["cookie"], "ua": m["ua"]}
-            if len(urls) == 1 and not is_media(urls[0]):
+            if len(urls) == 1 and not is_media(urls[0], True):
                 self.add_many(urls, auto=True, ctx=ctx)
             elif len(urls) == 1:
                 self.media_flow(urls[0])
             else:
                 BatchDialog(self, urls, True, ctx)
             return
-        if kind == "link" and is_media(url):      # right-click on a link to a video site
-            self.root.deiconify()
+        if kind == "link" and is_media(url, True):      # right-click on a link to a video site
             self.media_flow(url)
             return
         old = next((j for j in JOBS if j.url == url and j.status != "Done"), None)
@@ -2718,8 +3110,7 @@ class App:
         if j.kind == "stream":                         # ask which quality, if the stream offers several
             def then(u, info):
                 if info["opts"]:
-                    self.root.deiconify()
-                    MediaDialog(self, u, {"title": j.name, "uploader": "HLS stream", "_job": j},
+                            MediaDialog(self, u, {"title": j.name, "uploader": "HLS stream", "_job": j},
                                 info["opts"])
                 else:
                     JOBS.append(j)
@@ -2912,7 +3303,7 @@ class App:
     def settings(self, tab=None):
         w = tk.Toplevel(self.root)
         w.title("Settings")
-        w.transient(self.root)
+        tr(w, self.root)
         w.configure(bg=P["bg"])
         outer = ttk.Frame(w, padding=(S(16), S(14), S(16), S(14)))
         outer.pack(fill="both", expand=True)
@@ -2951,6 +3342,10 @@ class App:
         combo(g, 4, "Theme", "theme", ["System", "Light", "Dark"], CFG["theme"].capitalize(), 12)
         combo(g, 6, "Download list size", "density", ["Compact", "Comfortable"],
               CFG.get("density", "compact").capitalize(), 12)
+        if WIN:
+            check(g, 7, "Keep running in the notification area when the window is closed (X)", "tray")
+        else:
+            vs["tray"] = tk.BooleanVar(value=CFG["tray"])
         vs["startup"] = tk.BooleanVar(value=False)
         if WIN and getattr(sys, "frozen", False):
             ttk.Checkbutton(g, text="Start MyDM with Windows (needed for scheduled downloads)",
@@ -3105,7 +3500,7 @@ class App:
                        ytq=vs["ytq"].get(),
                        cookies="" if vs["cookies"].get() == "none" else vs["cookies"].get(),
                        watch_media=vs["watch_media"].get(), ipv4=vs["ipv4"].get(),
-                       cookies_share=vs["cookies_share"].get(),
+                       cookies_share=vs["cookies_share"].get(), tray=vs["tray"].get(),
                        cookiefile=vs["cookiefile"].get().strip().strip('"'),
                        clip_mode=next(k for k, x in clips.items() if x == vs["clip_mode"].get()))
             if WIN and getattr(sys, "frozen", False):
@@ -3125,10 +3520,11 @@ class App:
 
     def place_dialog(self, w, key=None):
         w.update_idletasks()
-        r = self.root
+        r = anchor(self.root)
         w.geometry(f"+{r.winfo_rootx() + max(0, (r.winfo_width() - w.winfo_reqwidth()) // 2)}"
                    f"+{r.winfo_rooty() + S(50)}")
         titlebar(w, P["dark"])
+        ontop(w, self)
         if key:
             keep_size(w, key, 380, 260)
         w.grab_set()
@@ -3138,7 +3534,7 @@ class App:
         s = CFG["sched"]
         w = tk.Toplevel(self.root)
         w.title("Scheduler")
-        w.transient(self.root)
+        tr(w, self.root)
         w.configure(bg=P["bg"])
         f = ttk.Frame(w, padding=S(18))
         f.pack(fill="both", expand=True)
@@ -3250,6 +3646,16 @@ class App:
                 self.from_browser(self.inbox.get_nowait())
             except queue.Empty:
                 break
+        while self.tray:
+            try:
+                cmd = self.tray.q.get_nowait()
+            except queue.Empty:
+                break
+            if cmd == "open":
+                self.show_main()
+            elif cmd == "exit":
+                self.close()
+                return
         active = [j for j in JOBS if j.status in ("Connecting", "Downloading")]
         for j in JOBS:
             if j.status == "Waiting" and len(active) < CFG["parallel"]:
@@ -3360,6 +3766,8 @@ class App:
 
 
 if __name__ == "__main__":
+    if "--again" not in sys.argv and already_running():
+        sys.exit(0)
     try:
         import ctypes
         ctypes.windll.shcore.SetProcessDpiAwareness(1)

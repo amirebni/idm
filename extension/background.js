@@ -1,4 +1,4 @@
-// MyDM Downloader 3.2 - background service worker
+// MyDM Downloader 3.4 - background service worker
 const PORTS = [17890, 17891, 17892, 17893, 17894, 17895, 17896, 17897, 17898, 17899];
 const MEDIA_EXT = new Set(["mp4", "m4v", "webm", "mkv", "mov", "avi", "flv", "wmv",
   "mp3", "m4a", "aac", "ogg", "oga", "opus", "wav", "flac"]);
@@ -202,9 +202,34 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
   }
   if (msg.type === "ping") { findApp().then((a) => reply(a || null)); return true; }
   if (msg.type === "browserDownload") {
-    chrome.downloads.download({ url: msg.url }).then(() => reply({ ok: true }), () => reply({ ok: false }));
+    browserDownload(msg.url).then((ok) => reply({ ok }));
     return true;
   }
+});
+
+// ---------- take over the browser's own downloads ----------
+// The browser's download is cancelled right away and MyDM downloads the file instead (when MyDM is running).
+// If MyDM is closed, or refuses, the browser downloads as usual.
+const ownDownloads = new Map();      // url -> time: downloads that the extension itself asked the browser to do
+async function browserDownload(url) {
+  ownDownloads.set(url, Date.now());
+  try { await chrome.downloads.download({ url }); return true; } catch (e) { return false; }
+}
+chrome.downloads.onCreated.addListener(async (item) => {
+  try {
+    const cfg = await chrome.storage.sync.get({ capture: true });
+    if (!cfg.capture || item.byExtensionId) return;
+    const url = item.finalUrl || item.url || "";
+    if (!/^https?:/i.test(url)) return;                                    // blob:, data:, file: ... stay with the browser
+    const t = ownDownloads.get(item.url) || ownDownloads.get(url);
+    if (t && Date.now() - t < 60000) return;                               // our own fallback download
+    const app = await findApp();
+    if (!app) return;
+    await chrome.downloads.cancel(item.id).catch(() => {});
+    chrome.downloads.erase({ id: item.id }).catch(() => {});
+    const r = await sendToApp({ url, referer: item.referrer || "", kind: "file", action: "start", name: "" });
+    if (!r.ok) { await browserDownload(url); }                              // MyDM did not take it: let the browser do it
+  } catch (e) { /* leave the download alone */ }
 });
 
 // ---------- toolbar icon (drawn in code, so no image files are needed) ----------

@@ -31,8 +31,14 @@ Project page: https://github.com/amirebni/idm
 - Right-click "Download with MyDM" on links and on selected text (every URL in the selection)
 - Sends referer, cookies and user agent to the app
 
+**Browser downloads and tray**
+- The extension takes over the browser's own downloads (switch it off in the extension popup): the browser's download is cancelled and MyDM downloads the file instead. If MyDM is not running or refuses, the browser downloads as usual.
+- Windows from the browser (quality list, progress, extension permission) appear in front of the browser, even when MyDM is hidden.
+- The X button hides MyDM in the notification area (next to the clock); left-click the icon to open it, right-click for Open / Exit. Turn it off in Settings > General. A second start of MyDM just shows the running one.
+
 **Interface**
 - Table UI: menu bar, toolbar, search, category + queue sidebar, status bar
+- The download progress window is compact (name, percent, bar, buttons); click *Details* to open the connections, speed graph and file info (the choice is remembered)
 - Light / dark / system theme, compact or comfortable rows
 - Resizable windows, columns (drag header edges) and sidebar (drag the splitter); sizes are remembered; View > Reset layout
 - Settings tabs: General, Connection, Browser, Video, About
@@ -54,8 +60,8 @@ For video sites put the `yt-dlp` file, `ffmpeg.exe` and `qjs.exe` next to `dm.py
 1. Push the repository to GitHub. `.github/workflows/build.yml` builds the installer with PyInstaller + Inno Setup and uploads two artifacts: `MyDM-Setup-vX` and `MyDM-Extension-vX` (the workflow also runs weekly to pick up the newest yt-dlp).
 2. To publish a release (needed by **Check for updates**), push a tag:
    ```sh
-   git tag v3.2
-   git push origin v3.2
+   git tag v3.4
+   git push origin v3.4
    ```
    The workflow attaches the installer and `MyDM_Extension.zip` to the GitHub release.
 
